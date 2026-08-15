@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Questify</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- PWA / Add to Home Screen support -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="logo.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#0f0f1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Questify">
+</head>
+<body>
+
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <div id="app">
+    <header class="app-header" id="app-header">
+      <div class="container app-header__inner">
+        <h1 class="app-header__logo">
+          <img src="logo.svg" alt="" class="app-header__icon" width="28" height="28">
+          Questify
+        </h1>
+        <nav class="app-nav" aria-label="Main navigation">
+          <button class="app-nav__btn" data-view="dashboard">Dashboard</button>
+          <button class="app-nav__btn" data-view="challenges">Challenges</button>
+          <button class="app-nav__btn" data-view="calendar">Calendar</button>
+          <button class="app-nav__btn" data-view="badges">Badges</button>
+          <button class="app-nav__btn" data-view="stats">Stats</button>
+          <button class="app-nav__btn" data-view="profile">Profile</button>
+          <button class="app-nav__btn" data-view="settings">Settings</button>
+        </nav>
+
+        <div class="notif-bell-wrapper">
+          <button
+            id="notif-bell-btn"
+            class="notif-bell-btn"
+            aria-label="Notifications"
+            aria-haspopup="true"
+            aria-expanded="false"
+          >
+            🔔
+            <span id="notif-badge" class="notif-badge is-hidden" aria-hidden="true">0</span>
+          </button>
+          <div id="notif-panel" class="notif-panel is-hidden">
+            <div class="notif-panel__header">
+              <h3>Notifications</h3>
+              <button id="notif-clear-btn" class="btn-secondary btn-sm">Clear all</button>
+            </div>
+            <div id="notif-list" class="notif-list"></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container app-main" id="main-content" tabindex="-1">
+      <!-- Dynamic content will render here via JS -->
+    </main>
+
+    <footer class="app-footer">
+      <div class="container app-footer__inner">
+        <div class="app-footer__brand">
+          <span class="app-footer__brand-label text-muted">Built by</span>
+          <div class="app-footer__logo-wrapper">
+            <img src="hydev-logo.png" alt="HyDev logo" class="app-footer__logo">
+          </div>
+        </div>
+        <p class="app-footer__text">&copy; 2026 Aliyu Muhammad Jazuli. All rights reserved.</p>
+      </div>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="script.js"></script>
+
+  <!-- Service worker registration - additive only, never blocks app startup
+       or touches localStorage. Safe no-op in browsers without support. -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("service-worker.js").catch((err) => {
+          console.warn("Service worker registration failed:", err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>

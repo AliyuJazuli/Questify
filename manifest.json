@@ -1,0 +1,25 @@
+{
+  "name": "Questify",
+  "short_name": "Questify",
+  "description": "Gamified daily challenge and habit tracker.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f0f1a",
+  "theme_color": "#0f0f1a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "logo.svg",
+      "sizes": "192x192",
+      "type": "image/svg",
+      "purpose": "any"
+    },
+    {
+      "src": "logo.svg",
+      "sizes": "512x512",
+      "type": "image/svg",
+      "purpose": "any"
+    }
+  ]
+}
