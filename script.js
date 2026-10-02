@@ -39,7 +39,7 @@ const CONFIG = {
   SEARCH_DEBOUNCE_MS: 200,
   MAX_NOTIFICATIONS: 20,
   XP_PER_LEVEL_MULTIPLIER: 100,
-  DEFAULT_WEEKLY_GOAL: 5,
+  DEFAULT_DAILY_GOAL: 3,
 };
 
 function getDefaultState() {
@@ -52,13 +52,13 @@ function getDefaultState() {
       lastCompletedDate: null,
       isOnboarded: false,
       hasSeenTour: false,
-      weeklyGoal: CONFIG.DEFAULT_WEEKLY_GOAL,
+      dailyGoal: CONFIG.DEFAULT_DAILY_GOAL,
     },
     challenges: [],
     unlockedBadgeIds: [],
     notifications: [],
     preferences: {
-      theme: "dark",
+      theme: "light",
       soundEnabled: true,
       hapticsEnabled: true,
       remindersEnabled: false,
@@ -85,15 +85,16 @@ function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const savedState = JSON.parse(raw);
+      const defaultState = getDefaultState();  // Call once for efficiency
       state = {
-        ...getDefaultState(),
+        ...defaultState,
         ...savedState,
         user: {
-          ...getDefaultState().user,
+          ...defaultState.user,
           ...savedState.user,
         },
         preferences: {
-          ...getDefaultState().preferences,
+          ...defaultState.preferences,
           ...savedState.preferences,
         },
       };
@@ -117,10 +118,26 @@ let currentView = "dashboard";
 let isEditingName = false;
 let searchQuery = "";
 let statusFilter = "all"; // "all" | "active" | "completed" | "archived"
+let dueFilter = "all"; // "all" | "today" | "week" - which challenges show by scheduled date
 let isConfirmingReset = false;
 let tourStep = 0; // which onboarding tour slide is showing (0-2)
 let lockInIntervalId = null; // ticks the active Lock In session's live timer
 let dayDetailDate = null; // "YYYY-MM-DD" of the weekly-view day whose detail modal is open, or null
+
+// Singleton debounced functions to prevent memory leaks
+let debouncedSearchRerender = null;
+
+// Track which handlers have been attached to prevent duplicate event listeners
+const attachedHandlers = {
+  dashboard: false,
+  challenges: false,
+  calendar: false,
+  profile: false,
+  settings: false,
+  tour: false,
+  login: false,
+  notifBell: false,
+};
 
 // -------------------------------------
 // PWA install state (not persisted - browser/session only)
@@ -175,7 +192,12 @@ function toggleHeaderVisibility() {
 // -------------------------------------
 function applyTheme() {
   const theme = state.preferences.theme;
-  document.documentElement.setAttribute("data-theme", theme === "light" ? "light" : "dark");
+  const activeTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", activeTheme);
+  const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeColorMeta) {
+    themeColorMeta.content = activeTheme === "light" ? "#f5f7fb" : "#0d1220";
+  }
 }
 
 function toggleTheme() {
@@ -269,8 +291,13 @@ function renderInstallSection() {
 
 // -------------------------------------
 // Performance: debounce utility
+// Store debounced functions at module level to prevent memory leaks
 // -------------------------------------
+const debouncedFunctions = new Map();
+
 function debounce(fn, delay) {
+  // Create a unique key for this function/delay combination
+  // In practice, we reuse the same debounced function for the same purpose
   let timeoutId;
   return function debounced(...args) {
     clearTimeout(timeoutId);
@@ -383,7 +410,21 @@ function getRecurrenceConfig(recurrence) {
 // so we fall back to their creation date - same migration-safety pattern
 // used throughout (Module 6, Module 13).
 function getChallengeScheduledDate(challenge) {
-  return challenge.scheduledDate || (challenge.dateCreated ? challenge.dateCreated.slice(0, 10) : getTodayDateString());
+  const dateStr = challenge.scheduledDate || 
+    (challenge.dateCreated ? challenge.dateCreated.slice(0, 10) : getTodayDateString());
+  
+  // Validate date string format (YYYY-MM-DD) and return today if invalid
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    try {
+      const d = new Date(`${dateStr}T00:00:00`);
+      if (!isNaN(d.getTime())) {
+        return dateStr;
+      }
+    } catch (e) {
+      // Invalid date
+    }
+  }
+  return getTodayDateString();
 }
 
 // -------------------------------------
@@ -585,8 +626,17 @@ function getDueTodayChallenges(s = state) {
 // surfaced through its own dedicated panel instead of the normal list,
 // and it doesn't force-stop when the target time is reached - it just
 // notifies and switches into an "overtime" state so the user can keep
-// going or wrap up whenever they choose.
+// going or wrap up whenever they choose. Sessions can be paused (the
+// clock stops accumulating) and the target time can be extended
+// mid-session without losing progress.
 const LOCKIN_DURATION_OPTIONS = [25, 45, 60, 90];
+
+// XP per minute, by difficulty - mirrors the ~1:2:3.5 ratio regular
+// challenges use (10/20/35 XP), scaled down to a per-minute rate.
+const LOCKIN_XP_RATE = { easy: 1, medium: 1.5, hard: 2.5 };
+// Minutes spent in overtime (past the original target) earn extra,
+// rewarding pushing through rather than stopping right at the buzzer.
+const LOCKIN_OVERTIME_MULTIPLIER = 1.5;
 
 function isRunningLockIn(c) {
   return Boolean(c.isLockIn && c.startedAt && !c.completed);
@@ -602,6 +652,27 @@ function formatLockInDuration(totalSeconds) {
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// Base minutes (up to the target) earn the difficulty's flat rate;
+// anything beyond the original target earns that rate boosted by the
+// overtime multiplier. Difficulty affects the rate, not a fixed total,
+// so extending or overshooting the session always earns proportionally.
+function computeLockInXp(targetMinutes, actualMinutes, difficulty) {
+  const rate = LOCKIN_XP_RATE[difficulty] || LOCKIN_XP_RATE.medium;
+  const baseMinutes = Math.min(actualMinutes, targetMinutes);
+  const overtimeMinutes = Math.max(0, actualMinutes - targetMinutes);
+  const xp = baseMinutes * rate + overtimeMinutes * rate * LOCKIN_OVERTIME_MULTIPLIER;
+  return Math.max(1, Math.round(xp));
+}
+
+// Elapsed time is pause-aware: accumulatedSeconds holds everything
+// banked from prior running segments, and - only while not paused - we
+// add the time since the current segment's startedAt.
+function getLockInElapsedSeconds(challenge) {
+  const accumulated = challenge.accumulatedSeconds || 0;
+  if (challenge.isPaused) return accumulated;
+  return accumulated + Math.floor((Date.now() - new Date(challenge.startedAt).getTime()) / 1000);
 }
 
 function startLockIn(title, targetMinutes, difficulty = "medium") {
@@ -629,7 +700,7 @@ function startLockIn(title, targetMinutes, difficulty = "medium") {
     id: generateId(),
     title: result.value,
     difficulty: finalDifficulty,
-    xpValue: minutes,
+    xpValue: computeLockInXp(minutes, minutes, finalDifficulty),
     category: "lockin",
     recurrence: "none",
     scheduledDate: getTodayDateString(),
@@ -639,6 +710,8 @@ function startLockIn(title, targetMinutes, difficulty = "medium") {
     isLockIn: true,
     targetMinutes: minutes,
     startedAt: new Date().toISOString(),
+    accumulatedSeconds: 0,
+    isPaused: false,
     notifiedAtTarget: false,
     actualMinutes: null,
   };
@@ -648,12 +721,38 @@ function startLockIn(title, targetMinutes, difficulty = "medium") {
   return { ok: true };
 }
 
+function pauseLockIn(id) {
+  const challenge = state.challenges.find((c) => c.id === id);
+  if (!challenge || !isRunningLockIn(challenge) || challenge.isPaused) return;
+  challenge.accumulatedSeconds = getLockInElapsedSeconds(challenge);
+  challenge.isPaused = true;
+  saveState();
+}
+
+function resumeLockIn(id) {
+  const challenge = state.challenges.find((c) => c.id === id);
+  if (!challenge || !isRunningLockIn(challenge) || !challenge.isPaused) return;
+  challenge.startedAt = new Date().toISOString();
+  challenge.isPaused = false;
+  saveState();
+}
+
+function addLockInTime(id, extraMinutes) {
+  const challenge = state.challenges.find((c) => c.id === id);
+  if (!challenge || !isRunningLockIn(challenge)) return;
+  challenge.targetMinutes = Math.min(480, challenge.targetMinutes + extraMinutes);
+  // Allow a fresh "time's up" notification once the new, later target is reached.
+  challenge.notifiedAtTarget = false;
+  saveState();
+}
+
 function finishLockIn(id) {
   const challenge = state.challenges.find((c) => c.id === id);
   if (!challenge || challenge.completed) return;
 
-  const elapsedSec = Math.floor((Date.now() - new Date(challenge.startedAt).getTime()) / 1000);
+  const elapsedSec = getLockInElapsedSeconds(challenge);
   challenge.actualMinutes = Math.max(1, Math.round(elapsedSec / 60));
+  challenge.xpValue = computeLockInXp(challenge.targetMinutes, challenge.actualMinutes, challenge.difficulty);
   completeChallenge(id);
   stopLockInTicker();
 }
@@ -672,25 +771,29 @@ function updateLockInTimerDisplay() {
   const timeEl = document.getElementById("lockin-timer");
   const statusEl = document.getElementById("lockin-status");
   const progressEl = document.getElementById("lockin-progress-fill");
+  const pauseBtn = document.getElementById("lockin-pause-btn");
 
   if (!active || !timeEl) {
     stopLockInTicker();
     return;
   }
 
-  const elapsedSec = Math.floor((Date.now() - new Date(active.startedAt).getTime()) / 1000);
+  if (pauseBtn) pauseBtn.textContent = active.isPaused ? "Resume" : "Pause";
+
+  const elapsedSec = getLockInElapsedSeconds(active);
   const targetSec = active.targetMinutes * 60;
   const overBy = elapsedSec - targetSec;
+  const projectedXp = computeLockInXp(active.targetMinutes, Math.max(1, Math.round(elapsedSec / 60)), active.difficulty);
 
   if (overBy >= 0) {
     timeEl.textContent = `${formatLockInDuration(targetSec)} target + ${formatLockInDuration(overBy)} over`;
     if (statusEl) {
-      statusEl.textContent = "🔥 Overtime - keep going or finish anytime";
-      statusEl.classList.add("is-overtime");
+      statusEl.textContent = active.isPaused ? "⏸️ Paused (in overtime)" : "🔥 Overtime - keep going or finish anytime";
+      statusEl.classList.toggle("is-overtime", !active.isPaused);
     }
     if (progressEl) progressEl.style.width = "100%";
 
-    if (!active.notifiedAtTarget) {
+    if (!active.notifiedAtTarget && !active.isPaused) {
       active.notifiedAtTarget = true;
       saveState();
       addNotification(`Lock In time's up for "${active.title}" - you can keep going!`, "⏰");
@@ -699,11 +802,14 @@ function updateLockInTimerDisplay() {
   } else {
     timeEl.textContent = `${formatLockInDuration(elapsedSec)} / ${active.targetMinutes}m target`;
     if (statusEl) {
-      statusEl.textContent = "Locked in...";
+      statusEl.textContent = active.isPaused ? "⏸️ Paused" : "Locked in...";
       statusEl.classList.remove("is-overtime");
     }
     if (progressEl) progressEl.style.width = `${Math.min(100, (elapsedSec / targetSec) * 100)}%`;
   }
+
+  const xpEl = document.getElementById("lockin-xp-preview");
+  if (xpEl) xpEl.textContent = `~${projectedXp} XP so far`;
 }
 
 function startLockInTicker() {
@@ -794,11 +900,22 @@ function getDateStringWithOffset(offsetDays) {
 // Turns a "YYYY-MM-DD" into a friendly label: "Today", "Tomorrow",
 // "Yesterday", or "Aug 15" for anything further out.
 function formatScheduledDateLabel(dateStr) {
+  // Validate and sanitize date string
+  if (!dateStr || typeof dateStr !== "string") {
+    return "Today";
+  }
+  
   if (dateStr === getTodayDateString()) return "Today";
   if (dateStr === getDateStringWithOffset(1)) return "Tomorrow";
   if (dateStr === getDateStringWithOffset(-1)) return "Yesterday";
-  const d = new Date(`${dateStr}T00:00:00`);
-  return `${CALENDAR_MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+  
+  try {
+    const d = new Date(`${dateStr}T00:00:00`);
+    if (isNaN(d.getTime())) return "Today";
+    return `${CALENDAR_MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+  } catch (e) {
+    return "Today";
+  }
 }
 
 function updateStreak() {
@@ -911,9 +1028,9 @@ const BADGES = [
     id: "goal-setter",
     tier: "easy",
     name: "Goal Setter",
-    description: "Set a custom weekly goal",
+    description: "Set a custom daily goal",
     icon: "🏁",
-    condition: (s) => (s.user.weeklyGoal || CONFIG.DEFAULT_WEEKLY_GOAL) !== CONFIG.DEFAULT_WEEKLY_GOAL,
+    condition: (s) => (s.user.dailyGoal || CONFIG.DEFAULT_DAILY_GOAL) !== CONFIG.DEFAULT_DAILY_GOAL,
   },
 
   // ============= HARD (50) - longer-run milestones and mastery goals =============
@@ -1331,17 +1448,14 @@ const BADGES = [
     },
   },
 
-  // --- Weekly goal ---
+  // --- Daily goal ---
   {
     id: "goal-crusher",
     tier: "hard",
     name: "Goal Crusher",
-    description: "Hit your weekly goal",
+    description: "Hit your daily goal",
     icon: "🏹",
-    condition: (s) => {
-      const wins = getWeeklyWins();
-      return wins.completedCount >= (s.user.weeklyGoal || CONFIG.DEFAULT_WEEKLY_GOAL);
-    },
+    condition: (s) => getTodayCompletedCount(s) >= (s.user.dailyGoal || CONFIG.DEFAULT_DAILY_GOAL),
   },
 
   // --- Personalization ---
@@ -1418,6 +1532,11 @@ function completeChallenge(id) {
     spawnNextRecurrence(challenge);
   }
 
+  // Stop the Lock In ticker if this was an active Lock In session
+  if (challenge.isLockIn && lockInIntervalId) {
+    stopLockInTicker();
+  }
+
   saveState();
   triggerCompletionFeedback();
 }
@@ -1483,6 +1602,14 @@ function triggerBadgeFeedback() {
   vibrateDevice([30, 40, 30]);
 }
 
+// A single light tick - for small in-session actions (pause, resume,
+// add time) that need to feel acknowledged without the full fanfare
+// reserved for actually finishing something.
+function triggerActionFeedback() {
+  playTone(740, 0, 0.08, 0.12);
+  vibrateDevice(15);
+}
+
 // -------------------------------------
 // Notifications: persistent log
 // -------------------------------------
@@ -1499,7 +1626,7 @@ function addNotification(message, icon) {
   state.notifications = state.notifications.slice(0, CONFIG.MAX_NOTIFICATIONS);
   saveState();
 
-  showToast(`${icon} ${message}`);
+  showToast(`${escapeHTML(icon)} ${escapeHTML(message)}`);
   renderNotifBell();
 }
 
@@ -1556,9 +1683,9 @@ function renderNotifBell() {
     .map(
       (n) => `
         <div class="notif-item ${n.isRead ? "" : "is-unread"}" data-id="${n.id}">
-          <div class="notif-item__icon">${n.icon}</div>
+          <div class="notif-item__icon">${escapeHTML(n.icon)}</div>
           <div>
-            <div class="notif-item__message">${n.message}</div>
+            <div class="notif-item__message">${escapeHTML(n.message)}</div>
             <div class="notif-item__time">${formatRelativeTime(n.timestamp)}</div>
           </div>
         </div>
@@ -1568,6 +1695,10 @@ function renderNotifBell() {
 }
 
 function initNotifBell() {
+  // Only attach once to prevent memory leaks
+  if (attachedHandlers.notifBell) return;
+  attachedHandlers.notifBell = true;
+
   const bellBtn = document.getElementById("notif-bell-btn");
   const panel = document.getElementById("notif-panel");
   const clearBtn = document.getElementById("notif-clear-btn");
@@ -1622,7 +1753,14 @@ function getFilteredChallenges() {
         ? c.completed && !c.archived
         : true;
 
-    return matchesSearch && matchesStatus;
+    const matchesDue =
+      dueFilter === "today"
+        ? getChallengeScheduledDate(c) === getTodayDateString()
+        : dueFilter === "week"
+        ? isDateInCurrentWeek(getChallengeScheduledDate(c))
+        : true;
+
+    return matchesSearch && matchesStatus && matchesDue;
   });
 
   // Active challenges surface most-urgent (overdue, then due-today, then
@@ -1783,27 +1921,55 @@ function getWeeklyWins() {
 }
 
 // -------------------------------------
-// Weekly goal: progress toward user.weeklyGoal
+// Daily goal: progress toward user.dailyGoal
 // -------------------------------------
-function getWeeklyGoalProgress() {
-  const wins = getWeeklyWins();
-  const goal = Math.max(1, state.user.weeklyGoal || CONFIG.DEFAULT_WEEKLY_GOAL);
-  const percent = Math.min(100, Math.round((wins.completedCount / goal) * 100));
-  return { completed: wins.completedCount, goal, percent };
+function getTodayCompletedCount(s = state) {
+  const today = getTodayDateString();
+  return getCompletedChallenges(s).filter((c) => (c.dateCompleted || c.dateCreated).slice(0, 10) === today)
+    .length;
 }
 
-function setWeeklyGoal(goal) {
+function getDailyGoalProgress() {
+  const completed = getTodayCompletedCount();
+  const goal = Math.max(1, state.user.dailyGoal || CONFIG.DEFAULT_DAILY_GOAL);
+  const percent = Math.min(100, Math.round((completed / goal) * 100));
+  return { completed, goal, percent };
+}
+
+function setDailyGoal(goal) {
   const parsed = parseInt(goal, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return;
-  state.user.weeklyGoal = Math.min(50, parsed);
+  state.user.dailyGoal = Math.min(20, parsed);
   saveState();
 }
 
 // -------------------------------------
-// Category balance: completions this week, grouped by category
+// This week vs last week: completed-challenge comparison
 // -------------------------------------
-function getCategoryBalanceThisWeek() {
-  const wins = getWeeklyWins();
+function getWeekComparison(s = state) {
+  const { startOfWeek: thisWeekStart, endOfWeek: thisWeekEnd } = getCurrentWeekBounds();
+  const lastWeekStart = new Date(thisWeekStart);
+  lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+  const lastWeekEnd = new Date(thisWeekEnd);
+  lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
+
+  let thisWeekCount = 0;
+  let lastWeekCount = 0;
+
+  getCompletedChallenges(s).forEach((c) => {
+    const d = new Date(c.dateCompleted || c.dateCreated);
+    if (d >= thisWeekStart && d <= thisWeekEnd) thisWeekCount += 1;
+    else if (d >= lastWeekStart && d <= lastWeekEnd) lastWeekCount += 1;
+  });
+
+  return { thisWeekCount, lastWeekCount, delta: thisWeekCount - lastWeekCount };
+}
+
+// -------------------------------------
+// Shared week-bounds helper (Sun-Sat), reused by weekly stats, category
+// balance, and the Challenges "This Week" due filter.
+// -------------------------------------
+function getCurrentWeekBounds() {
   const now = new Date();
   const startOfWeek = new Date(now);
   startOfWeek.setDate(now.getDate() - now.getDay());
@@ -1811,6 +1977,20 @@ function getCategoryBalanceThisWeek() {
   const endOfWeek = new Date(startOfWeek);
   endOfWeek.setDate(startOfWeek.getDate() + 6);
   endOfWeek.setHours(23, 59, 59, 999);
+  return { startOfWeek, endOfWeek };
+}
+
+function isDateInCurrentWeek(dateStr) {
+  const { startOfWeek, endOfWeek } = getCurrentWeekBounds();
+  const d = new Date(`${dateStr}T00:00:00`);
+  return d >= startOfWeek && d <= endOfWeek;
+}
+
+// -------------------------------------
+// Category balance: completions this week, grouped by category
+// -------------------------------------
+function getCategoryBalanceThisWeek() {
+  const { startOfWeek, endOfWeek } = getCurrentWeekBounds();
 
   const thisWeekCompletions = getCompletedChallenges().filter((c) => {
     const referenceDate = c.dateCompleted || c.dateCreated;
@@ -1926,38 +2106,200 @@ function drawActivityChartInner(canvas, ctx) {
 
   const data = getLast7DaysCompletionCounts();
   const maxCount = Math.max(1, ...data.map((d) => d.count));
+  const todayStr = getTodayDateString();
 
-  const padding = 24;
-  const chartWidth = displayWidth - padding * 2;
-  const chartHeight = displayHeight - padding * 2;
-  const barGap = 8;
+  const paddingTop = 22;
+  const paddingBottom = 20;
+  const paddingSide = 8;
+  const chartWidth = displayWidth - paddingSide * 2;
+  const chartHeight = displayHeight - paddingTop - paddingBottom;
+  const barGap = 10;
   const barWidth = chartWidth / data.length - barGap;
+  const barRadius = Math.min(6, barWidth / 2);
 
   ctx.clearRect(0, 0, displayWidth, displayHeight);
 
+  // Baseline
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(paddingSide, paddingTop + chartHeight + 0.5);
+  ctx.lineTo(displayWidth - paddingSide, paddingTop + chartHeight + 0.5);
+  ctx.stroke();
+
   data.forEach((point, i) => {
-    const barHeight = (point.count / maxCount) * chartHeight;
-    const x = padding + i * (barWidth + barGap);
-    const y = padding + (chartHeight - barHeight);
+    const isToday = point.date === todayStr;
+    const minBarHeight = 4;
+    const barHeight = point.count > 0 ? Math.max(minBarHeight, (point.count / maxCount) * chartHeight) : minBarHeight;
+    const x = paddingSide + i * (barWidth + barGap);
+    const y = paddingTop + (chartHeight - barHeight);
 
-    ctx.fillStyle = "#d97706";
-    ctx.fillRect(x, y, barWidth, barHeight);
+    // Bar - gradient fill on today, muted flat fill on other days so
+    // "today" pops out at a glance instead of every bar looking the same.
+    if (point.count === 0) {
+      ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+    } else if (isToday) {
+      const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
+      gradient.addColorStop(0, "#f59e0b");
+      gradient.addColorStop(1, "#d97706");
+      ctx.fillStyle = gradient;
+    } else {
+      ctx.fillStyle = "rgba(217, 119, 6, 0.45)";
+    }
 
-    ctx.fillStyle = "#a1a1aa";
-    ctx.font = "11px system-ui, sans-serif";
+    drawRoundedTopRect(ctx, x, y, barWidth, barHeight, barRadius);
+    ctx.fill();
+
+    // Value label (only when there's something to show)
+    if (point.count > 0) {
+      ctx.fillStyle = isToday ? "#f59e0b" : "#a1a1aa";
+      ctx.font = isToday ? "bold 11px system-ui, sans-serif" : "11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(point.count, x + barWidth / 2, y - 7);
+    }
+
+    // Weekday label
+    const dayLabel = CALENDAR_WEEKDAY_LABELS[new Date(`${point.date}T00:00:00`).getDay()].slice(0, 1);
+    ctx.fillStyle = isToday ? "#f59e0b" : "#71717a";
+    ctx.font = isToday ? "bold 11px system-ui, sans-serif" : "11px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(point.count, x + barWidth / 2, y - 6);
-
-    const dayLabel = point.date.slice(8, 10);
-    ctx.fillText(dayLabel, x + barWidth / 2, displayHeight - 6);
+    ctx.fillText(dayLabel, x + barWidth / 2, displayHeight - 4);
   });
 }
 
+function drawRoundedTopRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height);
+  ctx.beginPath();
+  ctx.moveTo(x, y + height);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.lineTo(x + width - r, y);
+  ctx.arcTo(x + width, y, x + width, y + r, r);
+  ctx.lineTo(x + width, y + height);
+  ctx.closePath();
+}
+
 // -------------------------------------
-// Weekly Goal: progress ring render helper (inline SVG)
+// Dashboard activity strip: a heatmap-style row of the last 7 days,
+// replacing the old bar chart. Uses the same intensity color language as
+// the Habit Calendar's month grid, so the two views read consistently.
+// -------------------------------------
+function renderActivityStrip() {
+  const data = getLast7DaysCompletionCounts();
+  const maxCount = Math.max(1, ...data.map((d) => d.count));
+  const todayStr = getTodayDateString();
+
+  const cells = data
+    .map((point) => {
+      const isToday = point.date === todayStr;
+      const intensity = point.count === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((point.count / maxCount) * 4)));
+      const dayLabel = CALENDAR_WEEKDAY_LABELS[new Date(`${point.date}T00:00:00`).getDay()].slice(0, 1);
+      const dateLabel = formatScheduledDateLabel(point.date);
+
+      return `
+        <div class="activity-strip__day ${isToday ? "is-today" : ""}" title="${dateLabel}: ${point.count} completed">
+          <span class="activity-strip__weekday">${dayLabel}</span>
+          <div class="activity-strip__cell intensity-${intensity}">${point.count > 0 ? point.count : ""}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `<div class="activity-strip">${cells}</div>`;
+}
+
+// -------------------------------------
+// Dashboard: combined streak + daily goal card, one container in a row
+// -------------------------------------
+function renderTodaySummaryCard() {
+  const progress = getDailyGoalProgress();
+  const radius = 32;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - progress.percent / 100);
+
+  return `
+    <div class="card today-summary-card">
+      <div class="today-summary__half">
+        <div class="streak-flame">🔥</div>
+        <div class="stat-value">${state.user.streak}</div>
+        <div class="text-muted">day${state.user.streak === 1 ? "" : "s"} streak</div>
+      </div>
+      <div class="today-summary__divider"></div>
+      <div class="today-summary__half">
+        <div class="today-summary__ring-wrapper">
+          <svg viewBox="0 0 80 80" class="today-summary__ring-svg">
+            <circle cx="40" cy="40" r="${radius}" class="goal-ring-track" />
+            <circle
+              cx="40" cy="40" r="${radius}"
+              class="goal-ring-fill"
+              stroke-dasharray="${circumference}"
+              stroke-dashoffset="${offset}"
+            />
+          </svg>
+          <div class="goal-ring-label">
+            <span class="today-summary__ring-value">${progress.completed}/${progress.goal}</span>
+          </div>
+        </div>
+        <div class="text-muted">daily goal</div>
+      </div>
+    </div>
+  `;
+}
+
+// -------------------------------------
+// Dashboard: Welcome card for first-time users
+// -------------------------------------
+function renderFirstTimeWelcomeCard() {
+  const hasChallenges = state.challenges.length > 0;
+  if (hasChallenges) return "";
+
+  return `
+    <section class="card welcome-card first-time-welcome" aria-labelledby="first-step-title">
+      <div class="welcome-card__copy">
+        <span class="welcome-card__eyebrow">YOUR FIRST SMALL WIN</span>
+        <h3 id="first-step-title">Start with five minutes.</h3>
+        <p class="text-muted">A tiny, doable step is enough to get your momentum going.</p>
+        <div class="welcome-card__suggestion">
+          <span class="welcome-card__suggestion-icon" aria-hidden="true">📖</span>
+          <span><strong>Read for 5 minutes</strong><small>Easy · Learning · +10 XP</small></span>
+        </div>
+      </div>
+      <div class="welcome-card__actions">
+        <button class="btn" id="first-challenge-btn">Add this first step</button>
+        <button class="btn-secondary" id="custom-first-challenge-btn">Make my own</button>
+      </div>
+    </section>
+  `;
+}
+
+// -------------------------------------
+// Dashboard: "resume what you were doing" banner for an in-progress
+// Lock In session - surfaces the most obvious next action rather than
+// making the user go hunting for it on the Challenges page.
+// -------------------------------------
+function renderResumeLockInBanner() {
+  const active = getActiveLockIn();
+  if (!active) return "";
+
+  const elapsedLabel = formatLockInDuration(getLockInElapsedSeconds(active));
+
+  return `
+    <div class="card resume-lockin-banner">
+      <div class="resume-lockin-banner__icon">🔒</div>
+      <div class="resume-lockin-banner__info">
+        <div class="resume-lockin-banner__title">${escapeHTML(active.title)}</div>
+        <div class="text-muted">${active.isPaused ? "⏸️ Paused" : "In progress"} · ${elapsedLabel} logged</div>
+      </div>
+      <button class="btn btn-sm" id="dashboard-resume-lockin-btn">Resume</button>
+    </div>
+  `;
+}
+
+// -------------------------------------
+// Daily Goal: progress ring render helper (inline SVG)
 // -------------------------------------
 function renderGoalRing() {
-  const progress = getWeeklyGoalProgress();
+  const progress = getDailyGoalProgress();
   const radius = 40;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - progress.percent / 100);
@@ -1980,12 +2322,12 @@ function renderGoalRing() {
         </div>
       </div>
       <div class="goal-ring-info">
-        <h3 style="margin: 0 0 4px;">Weekly Goal</h3>
+        <h3 style="margin: 0 0 4px;">Daily Goal</h3>
         <p class="text-muted" style="margin: 0;">
           ${
             progress.percent >= 100
-              ? "Goal reached! 🎉 Nice work this week."
-              : `${progress.goal - progress.completed} more to hit your goal.`
+              ? "Goal reached! 🎉 Nice work today."
+              : `${progress.goal - progress.completed} more to hit today's goal.`
           }
         </p>
       </div>
@@ -2211,7 +2553,66 @@ function renderWeeklyView() {
       <div class="week-grid" id="week-grid">
         ${days.map(renderWeekDayCard).join("")}
       </div>
-      <p class="week-view-hint text-muted">Tap any scheduled task to mark it complete.</p>
+      <p class="week-view-hint text-muted">Tap any scheduled task to mark it complete, or tap a day for details.</p>
+    </div>
+  `;
+}
+
+// -------------------------------------
+// Habit Calendar: "Today's Habits" - a bigger, always-visible daily
+// breakdown sitting right under the weekly strip, so today's status is
+// visible without needing to click into the day-detail modal.
+// -------------------------------------
+function renderTodayHabitsCard() {
+  const todayStr = getTodayDateString();
+  const { completed, active } = getDayDetail(todayStr);
+  const totalXp = completed.reduce((sum, c) => sum + c.xpValue, 0);
+  const goalProgress = getDailyGoalProgress();
+
+  const taskListHTML =
+    completed.length === 0 && active.length === 0
+      ? `<p class="text-muted" style="margin-top: var(--space-md);">Nothing scheduled for today yet.</p>`
+      : `
+        ${
+          active.length > 0
+            ? `
+              <div class="day-detail-section" style="margin-top: var(--space-md);">
+                <h4>To Do (${active.length})</h4>
+                ${active.map((c) => renderDayDetailRow(c, false)).join("")}
+              </div>
+            `
+            : ""
+        }
+        ${
+          completed.length > 0
+            ? `
+              <div class="day-detail-section" style="margin-top: var(--space-md);">
+                <h4>Completed (${completed.length})</h4>
+                ${completed.map((c) => renderDayDetailRow(c, true)).join("")}
+              </div>
+            `
+            : ""
+        }
+      `;
+
+  return `
+    <div class="card today-habits-card" style="margin-top: var(--space-lg);">
+      <h3 style="margin-top:0;">Today's Habits</h3>
+      <div class="profile-stats" style="grid-template-columns: repeat(3, 1fr); margin-top: 0;">
+        <div class="stat-card">
+          <div class="stat-value">${state.user.streak}</div>
+          <div class="stat-label text-muted">Streak</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">${goalProgress.completed}/${goalProgress.goal}</div>
+          <div class="stat-label text-muted">Daily Goal</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">${totalXp}</div>
+          <div class="stat-label text-muted">XP Today</div>
+        </div>
+      </div>
+      ${taskListHTML}
     </div>
   `;
 }
@@ -2340,6 +2741,13 @@ function renderLockInPanel() {
           <div id="lockin-progress-fill" class="lockin-progress-fill" style="width: 0%;"></div>
         </div>
         <div id="lockin-timer" class="lockin-timer">0m / ${active.targetMinutes}m target</div>
+        <div id="lockin-xp-preview" class="lockin-xp-preview text-muted">~0 XP so far</div>
+        <div class="lockin-panel__actions lockin-panel__actions--secondary">
+          <button id="lockin-pause-btn" class="btn-secondary btn-sm" data-id="${active.id}">
+            ${active.isPaused ? "Resume" : "Pause"}
+          </button>
+          <button id="lockin-add-time-btn" class="btn-secondary btn-sm" data-id="${active.id}">+10 min</button>
+        </div>
         <div class="lockin-panel__actions">
           <button id="lockin-finish-btn" class="btn btn-sm" data-id="${active.id}">Finish Session</button>
           <button id="lockin-cancel-btn" class="btn-secondary btn-sm" data-id="${active.id}">Cancel</button>
@@ -2353,8 +2761,8 @@ function renderLockInPanel() {
       <div class="lockin-panel__header">
         <span class="lockin-panel__badge">🔒 Lock In</span>
       </div>
-      <p class="text-muted" style="margin-top:0;">
-        Start a focused session. You'll be notified when time's up, but you can keep going.
+      <p class="text-muted lockin-panel__description">
+        Choose a focus block. Questify will let you know when time is up, and you can keep going if you need to.
       </p>
       <form id="lockin-start-form" class="lockin-start-form" novalidate>
         <label for="lockin-title-input" class="sr-only">Session title</label>
@@ -2365,29 +2773,49 @@ function renderLockInPanel() {
           autocomplete="off"
           maxlength="50"
         />
-        <label for="lockin-difficulty-select" class="sr-only">Difficulty</label>
-        <select id="lockin-difficulty-select" class="difficulty-select">
-          <option value="easy">Easy</option>
-          <option value="medium" selected>Medium</option>
-          <option value="hard">Hard</option>
-        </select>
-        <label for="lockin-duration-select" class="sr-only">Duration</label>
-        <select id="lockin-duration-select" class="difficulty-select">
-          ${LOCKIN_DURATION_OPTIONS.map(
-            (mins) => `<option value="${mins}" ${mins === 60 ? "selected" : ""}>${mins} min</option>`
-          ).join("")}
-          <option value="custom">Custom...</option>
-        </select>
-        <label for="lockin-custom-minutes-input" class="sr-only">Custom minutes</label>
-        <input
-          type="number"
-          id="lockin-custom-minutes-input"
-          class="date-input lockin-custom-input is-hidden"
-          placeholder="Minutes"
-          min="1"
-          max="240"
-        />
-        <button type="submit" class="btn">Lock In</button>
+        <div class="lockin-start-form__difficulty">
+          <label for="lockin-difficulty-select" class="sr-only">Difficulty</label>
+          <select id="lockin-difficulty-select" class="difficulty-select">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </div>
+        <div class="lockin-duration-control">
+          <div class="lockin-duration-control__heading">
+            <span>Session length</span>
+            <span class="text-muted">Pick a focus block</span>
+          </div>
+          <div class="lockin-duration-options" role="group" aria-label="Session duration">
+            ${LOCKIN_DURATION_OPTIONS.map(
+              (mins) => `
+                <button
+                  type="button"
+                  class="lockin-duration-option ${mins === 60 ? "is-selected" : ""}"
+                  data-duration="${mins}"
+                  aria-pressed="${mins === 60}"
+                >${mins} min</button>
+              `
+            ).join("")}
+            <button
+              type="button"
+              class="lockin-duration-option"
+              data-duration="custom"
+              aria-pressed="false"
+            >Custom</button>
+          </div>
+          <input type="hidden" id="lockin-duration-select" value="60" />
+          <label for="lockin-custom-minutes-input" class="sr-only">Custom duration in minutes</label>
+          <input
+            type="number"
+            id="lockin-custom-minutes-input"
+            class="lockin-custom-input is-hidden"
+            placeholder="Enter minutes (1–240)"
+            min="1"
+            max="240"
+          />
+        </div>
+        <button type="submit" class="btn lockin-start-form__submit">Start focus session</button>
       </form>
       <p class="error-text" id="lockin-error"></p>
     </div>
@@ -2497,8 +2925,8 @@ const views = {
     <div class="login-screen">
       <div class="login-card card">
         <img src="logo.svg" alt="Questify logo" class="login-card__logo">
-        <h1>Welcome to Questify</h1>
-        <p class="text-muted">Enter your name to begin your journey.</p>
+        <h1>Build Habits. Earn Streaks.</h1>
+        <p class="text-muted">Enter your name to start your first streak today.</p>
         <form id="login-form" class="login-form" novalidate>
           <label for="login-name-input" class="sr-only">Your name</label>
           <input
@@ -2509,7 +2937,7 @@ const views = {
             aria-required="true"
           />
           <p class="error-text" id="login-error"></p>
-          <button type="submit" class="btn">Start Questing</button>
+          <button type="submit" class="btn">Start My Streak</button>
         </form>
       </div>
     </div>
@@ -2536,47 +2964,177 @@ const views = {
     `;
   },
   dashboard: () => `
-    <div class="dashboard-greeting">
-      <h2>Welcome back, ${escapeHTML(state.user.name)}</h2>
-      <p class="text-muted">Here's where you stand today.</p>
-    </div>
-
-    <div class="card streak-card">
-      <div class="streak-flame">🔥</div>
-      <div class="streak-info">
-        <div class="stat-value">${state.user.streak} day${state.user.streak === 1 ? "" : "s"}</div>
-        <div class="text-muted">Current streak</div>
+    <section class="dashboard-hero">
+      <div class="dashboard-greeting">
+        <p class="dashboard-greeting__date">${new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</p>
+        <h2>Welcome back, ${escapeHTML(state.user.name)}</h2>
+        <p class="text-muted">Small wins add up. Here's your day at a glance.</p>
       </div>
-    </div>
+      <div class="dashboard-level-chip" aria-label="Level ${state.user.level}">
+        <span>YOUR LEVEL</span>
+        <strong>${state.user.level}</strong>
+      </div>
+    </section>
 
-    ${renderGoalRing()}
+    ${renderFirstTimeWelcomeCard()}
+    ${renderResumeLockInBanner()}
 
-    <div class="card">
-      <div class="profile-stats" style="grid-template-columns: repeat(2, 1fr);">
-        <div class="stat-card">
-          <div class="stat-value">${state.user.level}</div>
-          <div class="stat-label text-muted">Level</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value">${getCompletedChallenges().length}</div>
-          <div class="stat-label text-muted">Completed</div>
+    <section class="dashboard-section" aria-labelledby="dashboard-today-title">
+      <div class="dashboard-section__heading">
+        <div>
+          <p class="dashboard-section__eyebrow">YOUR DAILY SNAPSHOT</p>
+          <h3 id="dashboard-today-title">Today</h3>
         </div>
       </div>
-      ${renderXpBar()}
-    </div>
+      <div class="dashboard-overview-grid">
+        ${renderTodaySummaryCard()}
+        ${(() => {
+          const goal = getDailyGoalProgress();
+          const dueCount = getOverdueChallenges().length + getDueTodayChallenges().length;
+          return `
+            <div class="card dashboard-today-stats">
+              <div class="dashboard-today-stats__item">
+                <span class="dashboard-today-stats__icon" aria-hidden="true">✅</span>
+                <span class="dashboard-today-stats__value">${getTodayCompletedCount()}</span>
+                <span class="text-muted">completed today</span>
+              </div>
+              <div class="dashboard-today-stats__item">
+                <span class="dashboard-today-stats__icon" aria-hidden="true">🎯</span>
+                <span class="dashboard-today-stats__value">${Math.max(0, goal.goal - goal.completed)}</span>
+                <span class="text-muted">to reach your goal</span>
+              </div>
+              <div class="dashboard-today-stats__item">
+                <span class="dashboard-today-stats__icon" aria-hidden="true">📌</span>
+                <span class="dashboard-today-stats__value">${dueCount}</span>
+                <span class="text-muted">due or overdue</span>
+              </div>
+            </div>
+          `;
+        })()}
+      </div>
+    </section>
 
-    <div class="card mini-chart-card">
-      <h3 class="dashboard-section-title" style="margin-top:0;">Last 7 Days</h3>
-      <canvas id="dashboard-mini-chart"></canvas>
-    </div>
+    ${(() => {
+      const overdue = getOverdueChallenges();
+      const dueToday = getDueTodayChallenges();
+      const undoneCount = overdue.length + dueToday.length;
 
-    <h3 class="dashboard-section-title">Category Balance This Week</h3>
-    <div class="card">
-      ${renderCategoryBalanceCards()}
-    </div>
+      if (undoneCount === 0) {
+        return `
+          <div class="card dashboard-all-done" role="status">
+            <div class="dashboard-all-done__icon" aria-hidden="true">✨</div>
+            <div class="dashboard-all-done__copy">
+              <div class="dashboard-all-done__title">You're clear for today</div>
+              <div class="text-muted">No overdue or scheduled challenges. Take a breath or plan your next small win.</div>
+            </div>
+          </div>
+        `;
+      }
 
-    <h3 class="dashboard-section-title">Recent Badges</h3>
-    <div class="badge-preview-strip">
+      const overdueSection =
+        overdue.length > 0
+          ? `
+            <h4 class="dashboard-subsection-title dashboard-subsection-title--overdue">⚠️ Overdue (${overdue.length})</h4>
+            <div id="dashboard-overdue-list" class="challenge-list">
+              ${overdue.map(renderChallengeCard).join("")}
+            </div>
+          `
+          : "";
+
+      const dueTodaySection =
+        dueToday.length > 0
+          ? `
+            <h4 class="dashboard-subsection-title">Due Today (${dueToday.length})</h4>
+            <div id="dashboard-due-today-list" class="challenge-list">
+              ${dueToday.map(renderChallengeCard).join("")}
+            </div>
+          `
+          : "";
+
+      return overdueSection + dueTodaySection;
+    })()}
+
+    <section class="dashboard-section dashboard-section--tasks" aria-label="Add a challenge">
+      <form id="quick-add-form" class="quick-add-form" novalidate>
+        <label for="quick-add-input" class="quick-add-form__label">Add a small win</label>
+        <div class="quick-add-form__controls">
+          <input
+            type="text"
+            id="quick-add-input"
+            placeholder="e.g. Stretch for 5 minutes"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn">Add challenge</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="dashboard-progress-title">
+      <div class="dashboard-section__heading">
+        <div>
+          <p class="dashboard-section__eyebrow">YOUR MOMENTUM</p>
+          <h3 id="dashboard-progress-title">Progress &amp; consistency</h3>
+        </div>
+      </div>
+      <div class="dashboard-progress-grid">
+        <div class="card dashboard-xp-card">
+          <div class="dashboard-xp-card__stats">
+            <div class="stat-card">
+              <div class="stat-value">${state.user.xp}</div>
+              <div class="stat-label text-muted">Total XP</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">${getCompletedChallenges().length}</div>
+              <div class="stat-label text-muted">Challenges completed</div>
+            </div>
+          </div>
+          ${renderXpBar()}
+        </div>
+        <div class="card dashboard-activity-card">
+          <div class="dashboard-card-heading">
+            <div>
+              <h4>Last 7 days</h4>
+              <p class="text-muted">A little progress, every day.</p>
+            </div>
+          </div>
+          ${renderActivityStrip()}
+          ${(() => {
+            const cmp = getWeekComparison();
+            const arrow = cmp.delta > 0 ? "▲" : cmp.delta < 0 ? "▼" : "•";
+            const deltaClass = cmp.delta > 0 ? "is-up" : cmp.delta < 0 ? "is-down" : "";
+            const deltaText = cmp.delta === 0 ? "same as" : `${arrow} ${Math.abs(cmp.delta)} vs`;
+            return `
+              <p class="week-comparison-note text-muted">
+                <strong>${cmp.thisWeekCount}</strong> this week ·
+                <span class="week-comparison-delta ${deltaClass}">${deltaText}</span>
+                last week (${cmp.lastWeekCount})
+              </p>
+            `;
+          })()}
+        </div>
+      </div>
+    </section>
+
+    <section class="dashboard-section dashboard-insights-grid" aria-label="Weekly insights and badges">
+      <div class="card dashboard-category-card">
+        <div class="dashboard-card-heading">
+          <div>
+            <p class="dashboard-section__eyebrow">WEEKLY INSIGHT</p>
+            <h4>Category balance</h4>
+          </div>
+          <span class="dashboard-card-heading__icon" aria-hidden="true">◒</span>
+        </div>
+        ${renderCategoryBalanceCards()}
+      </div>
+      <div class="dashboard-badges-card">
+        <div class="dashboard-card-heading">
+          <div>
+            <p class="dashboard-section__eyebrow">KEEP IT UP</p>
+            <h4>Recent badges</h4>
+          </div>
+          <span class="dashboard-card-heading__icon" aria-hidden="true">🏅</span>
+        </div>
+        <div class="badge-preview-strip">
       ${
         state.unlockedBadgeIds.length === 0
           ? `<p class="text-muted">No badges yet. Complete a challenge to earn your first one.</p>`
@@ -2595,57 +3153,18 @@ const views = {
               })
               .join("")
       }
-    </div>
-
-    <h3 class="dashboard-section-title">Quick Add</h3>
-    <form id="quick-add-form" class="quick-add-form" novalidate>
-      <label for="quick-add-input" class="sr-only">Add a new challenge</label>
-      <input
-        type="text"
-        id="quick-add-input"
-        placeholder="Add a new challenge..."
-        autocomplete="off"
-      />
-      <button type="submit" class="btn">Add</button>
-    </form>
-
-    ${(() => {
-      const overdue = getOverdueChallenges();
-      const dueToday = getDueTodayChallenges();
-
-      if (overdue.length === 0 && dueToday.length === 0) {
-        return `
-          <h3 class="dashboard-section-title">Due Today</h3>
-          <p class="empty-state text-muted">🎉 You're all caught up! Nothing overdue or due today.</p>
-        `;
-      }
-
-      const overdueSection =
-        overdue.length > 0
-          ? `
-            <h3 class="dashboard-section-title dashboard-section-title--overdue">⚠️ Overdue (${overdue.length})</h3>
-            <div id="dashboard-overdue-list" class="challenge-list">
-              ${overdue.map(renderChallengeCard).join("")}
-            </div>
-          `
-          : "";
-
-      const dueTodaySection = `
-        <h3 class="dashboard-section-title">Due Today (${dueToday.length})</h3>
-        <div id="dashboard-due-today-list" class="challenge-list">
-          ${
-            dueToday.length === 0
-              ? `<p class="empty-state text-muted">Nothing due today.</p>`
-              : dueToday.map(renderChallengeCard).join("")
-          }
         </div>
-      `;
-
-      return overdueSection + dueTodaySection;
-    })()}
+      </div>
+    </section>
   `,
   challenges: () => `
-    <h2>Challenges</h2>
+    <section class="view-heading">
+      <div>
+        <p class="dashboard-section__eyebrow">PLAN YOUR NEXT WIN</p>
+        <h2>Challenges</h2>
+        <p class="text-muted">Turn the things you want to do into clear, achievable steps.</p>
+      </div>
+    </section>
 
     ${renderLockInPanel()}
 
@@ -2706,6 +3225,11 @@ const views = {
         <button class="filter-btn ${statusFilter === "completed" ? "is-active" : ""}" data-filter="completed">Completed</button>
         <button class="filter-btn ${statusFilter === "archived" ? "is-active" : ""}" data-filter="archived">Archived</button>
       </div>
+      <div class="filter-buttons">
+        <button class="filter-btn ${dueFilter === "all" ? "is-active" : ""}" data-due-filter="all">All Dates</button>
+        <button class="filter-btn ${dueFilter === "today" ? "is-active" : ""}" data-due-filter="today">Today</button>
+        <button class="filter-btn ${dueFilter === "week" ? "is-active" : ""}" data-due-filter="week">This Week</button>
+      </div>
     </div>
 
     <div id="challenge-list" class="challenge-list">
@@ -2729,6 +3253,8 @@ const views = {
     <p class="text-muted">See your completion activity at a glance, week by week and month by month.</p>
 
     ${renderWeeklyView()}
+
+    ${renderTodayHabitsCard()}
 
     <div class="card" style="margin-top: var(--space-lg);">
       ${renderCalendarGrid()}
@@ -2883,16 +3409,16 @@ const views = {
     <div class="settings-section card">
       <div class="settings-row">
         <div>
-          <div>Weekly Goal</div>
-          <div class="text-muted">How many challenges you want to complete each week</div>
+          <div>Daily Goal</div>
+          <div class="text-muted">How many challenges you want to complete each day</div>
         </div>
         <input
           type="number"
-          id="weekly-goal-input"
+          id="daily-goal-input"
           class="date-input weekly-goal-input"
           min="1"
-          max="50"
-          value="${state.user.weeklyGoal}"
+          max="20"
+          value="${state.user.dailyGoal}"
         />
       </div>
     </div>
@@ -2987,41 +3513,48 @@ const views = {
 
 // -------------------------------------
 // Shared: wire up Complete/Delete clicks on any challenge list container
+// Using document-level delegation to avoid memory leaks from repeated attachments
 // -------------------------------------
 function attachChallengeListDelegation(listElId) {
   const listEl = document.getElementById(listElId);
   if (!listEl) return;
 
-  listEl.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-action]");
-    if (!btn) return;
+  // Use document-level delegation - only attach once
+  // The listElId parameter is kept for backwards compatibility but not used
+  // All challenge action buttons have data-action attributes
+  if (!document.__challengeDelegationAttached) {
+    document.__challengeDelegationAttached = true;
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
 
-    const card = e.target.closest(".challenge-card");
-    const id = card?.dataset.id;
-    if (!id) return;
+      const card = e.target.closest(".challenge-card");
+      const id = card?.dataset.id;
+      if (!id) return;
 
-    const action = btn.dataset.action;
+      const action = btn.dataset.action;
 
-    if (action === "complete") {
-      completeChallenge(id);
-      renderView();
-    }
+      if (action === "complete") {
+        completeChallenge(id);
+        renderView();
+      }
 
-    if (action === "delete") {
-      deleteChallenge(id);
-      renderView();
-    }
+      if (action === "delete") {
+        deleteChallenge(id);
+        renderView();
+      }
 
-    if (action === "archive") {
-      archiveChallenge(id);
-      renderView();
-    }
+      if (action === "archive") {
+        archiveChallenge(id);
+        renderView();
+      }
 
-    if (action === "unarchive") {
-      unarchiveChallenge(id);
-      renderView();
-    }
-  });
+      if (action === "unarchive") {
+        unarchiveChallenge(id);
+        renderView();
+      }
+    });
+  }
 }
 
 // -------------------------------------
@@ -3030,6 +3563,28 @@ function attachChallengeListDelegation(listElId) {
 function attachDashboardHandlers() {
   attachChallengeListDelegation("dashboard-overdue-list");
   attachChallengeListDelegation("dashboard-due-today-list");
+
+  // First-time user: Add First Challenge button
+  const firstChallengeBtn = document.getElementById("first-challenge-btn");
+  if (firstChallengeBtn) {
+    firstChallengeBtn.addEventListener("click", () => {
+      const added = addChallenge("Read for 5 minutes", "easy", getTodayDateString(), "learning");
+      if (!added) {
+        showToast("⚠️ Could not add your first challenge. Please try again.");
+        return;
+      }
+      triggerActionFeedback();
+      showToast("📖 Your first step is ready. Go make it a win!");
+      renderView();
+    });
+  }
+
+  const customFirstChallengeBtn = document.getElementById("custom-first-challenge-btn");
+  if (customFirstChallengeBtn) {
+    customFirstChallengeBtn.addEventListener("click", () => {
+      navigateTo("challenges");
+    });
+  }
 
   const quickAddForm = document.getElementById("quick-add-form");
   if (quickAddForm) {
@@ -3043,7 +3598,7 @@ function attachDashboardHandlers() {
       });
 
       if (!result.isValid) {
-        showToast(`⚠️ ${result.errorMessage}`);
+        showToast(`⚠️ ${escapeHTML(result.errorMessage)}`);
         return;
       }
 
@@ -3052,13 +3607,22 @@ function attachDashboardHandlers() {
     });
   }
 
-  drawActivityChart("dashboard-mini-chart");
+  const resumeLockInBtn = document.getElementById("dashboard-resume-lockin-btn");
+  if (resumeLockInBtn) {
+    resumeLockInBtn.addEventListener("click", () => {
+      navigateTo("challenges");
+    });
+  }
 }
 
 // -------------------------------------
 // Wire up the calendar view after it's rendered
 // -------------------------------------
 function attachCalendarHandlers() {
+  // Only attach once to prevent memory leaks
+  if (attachedHandlers.calendar) return;
+  attachedHandlers.calendar = true;
+
   const prevBtn = document.getElementById("calendar-prev-btn");
   if (prevBtn) {
     prevBtn.addEventListener("click", () => {
@@ -3164,8 +3728,19 @@ function attachChallengesHandlers() {
 
   const lockinDurationSelect = document.getElementById("lockin-duration-select");
   const lockinCustomInput = document.getElementById("lockin-custom-minutes-input");
-  if (lockinDurationSelect && lockinCustomInput) {
-    lockinDurationSelect.addEventListener("change", () => {
+  const lockinDurationOptions = document.querySelector(".lockin-duration-options");
+  if (lockinDurationSelect && lockinCustomInput && lockinDurationOptions) {
+    lockinDurationOptions.addEventListener("click", (event) => {
+      const option = event.target.closest(".lockin-duration-option");
+      if (!option) return;
+
+      lockinDurationSelect.value = option.dataset.duration;
+      lockinDurationOptions.querySelectorAll(".lockin-duration-option").forEach((button) => {
+        const isSelected = button === option;
+        button.classList.toggle("is-selected", isSelected);
+        button.setAttribute("aria-pressed", String(isSelected));
+      });
+
       const isCustom = lockinDurationSelect.value === "custom";
       lockinCustomInput.classList.toggle("is-hidden", !isCustom);
       if (isCustom) lockinCustomInput.focus();
@@ -3185,6 +3760,38 @@ function attachChallengesHandlers() {
     lockinCancelBtn.addEventListener("click", () => {
       cancelLockIn(lockinCancelBtn.dataset.id);
       renderView();
+    });
+  }
+
+  const lockinPauseBtn = document.getElementById("lockin-pause-btn");
+  if (lockinPauseBtn) {
+    lockinPauseBtn.addEventListener("click", () => {
+      const active = getActiveLockIn();
+      if (!active) return;
+      if (active.isPaused) {
+        resumeLockIn(lockinPauseBtn.dataset.id);
+        showToast("▶️ Resumed");
+      } else {
+        pauseLockIn(lockinPauseBtn.dataset.id);
+        showToast("⏸️ Session paused");
+      }
+      triggerActionFeedback();
+      renderView();
+    });
+  }
+
+  const lockinAddTimeBtn = document.getElementById("lockin-add-time-btn");
+  if (lockinAddTimeBtn) {
+    lockinAddTimeBtn.addEventListener("click", () => {
+      addLockInTime(lockinAddTimeBtn.dataset.id, 10);
+      showToast("⏱️ +10 minutes added");
+      triggerActionFeedback();
+      renderView();
+      const timerEl = document.getElementById("lockin-timer");
+      if (timerEl) {
+        timerEl.classList.add("is-pulsing");
+        setTimeout(() => timerEl.classList.remove("is-pulsing"), 500);
+      }
     });
   }
 
@@ -3233,25 +3840,32 @@ function attachChallengesHandlers() {
 
   const searchInput = document.getElementById("search-input");
   if (searchInput) {
-    const debouncedRerender = debounce(() => {
-      renderView();
-      const newSearchInput = document.getElementById("search-input");
-      if (newSearchInput) {
-        newSearchInput.focus();
-        newSearchInput.setSelectionRange(searchQuery.length, searchQuery.length);
-      }
-    }, CONFIG.SEARCH_DEBOUNCE_MS);
+    // Create singleton debounced function if it doesn't exist
+    if (!debouncedSearchRerender) {
+      debouncedSearchRerender = debounce(() => {
+        renderView();
+        const newSearchInput = document.getElementById("search-input");
+        if (newSearchInput) {
+          newSearchInput.focus();
+          newSearchInput.setSelectionRange(searchQuery.length, searchQuery.length);
+        }
+      }, CONFIG.SEARCH_DEBOUNCE_MS);
+    }
 
     searchInput.addEventListener("input", (e) => {
       searchQuery = e.target.value;
-      debouncedRerender();
+      debouncedSearchRerender();
     });
   }
 
   const filterBtns = document.querySelectorAll(".filter-btn");
   filterBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
-      statusFilter = btn.dataset.filter;
+      if (btn.dataset.filter) {
+        statusFilter = btn.dataset.filter;
+      } else if (btn.dataset.dueFilter) {
+        dueFilter = btn.dataset.dueFilter;
+      }
       renderView();
     });
   });
@@ -3263,6 +3877,10 @@ function attachChallengesHandlers() {
 // Wire up the profile view after it's rendered
 // -------------------------------------
 function attachProfileHandlers() {
+  // Only attach once to prevent memory leaks
+  if (attachedHandlers.profile) return;
+  attachedHandlers.profile = true;
+
   const editBtn = document.getElementById("edit-name-btn");
   if (editBtn) {
     editBtn.addEventListener("click", () => {
@@ -3301,6 +3919,10 @@ function attachProfileHandlers() {
 // Wire up the settings view after it's rendered
 // -------------------------------------
 function attachSettingsHandlers() {
+  // Only attach once to prevent memory leaks
+  if (attachedHandlers.settings) return;
+  attachedHandlers.settings = true;
+
   const installBtn = document.getElementById("install-app-btn");
   if (installBtn) {
     installBtn.addEventListener("click", async () => {
@@ -3334,10 +3956,10 @@ function attachSettingsHandlers() {
     });
   }
 
-  const goalInput = document.getElementById("weekly-goal-input");
+  const goalInput = document.getElementById("daily-goal-input");
   if (goalInput) {
     goalInput.addEventListener("change", () => {
-      setWeeklyGoal(goalInput.value);
+      setDailyGoal(goalInput.value);
       renderView();
     });
   }
@@ -3569,6 +4191,7 @@ function navigateTo(viewName, pushToHistory = true) {
   isEditingName = false;
   searchQuery = "";
   statusFilter = "all";
+  dueFilter = "all";
   isConfirmingReset = false;
   dayDetailDate = null;
   if (viewName === "calendar") {

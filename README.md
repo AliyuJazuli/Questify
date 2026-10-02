@@ -31,6 +31,19 @@ For example, using VS Code, install the **Live Server** extension and choose **O
 
 > Use a local server rather than opening the file directly so that the service worker and PWA features work correctly.
 
+## Deploy with Netlify
+
+Questify is a static site with no build step. The included `netlify.toml` configures Netlify to publish the repository root.
+
+To deploy commits automatically, connect this GitHub repository (`AliyuJazuli/Questify`) to your Netlify site:
+
+1. Sign in to Netlify and open the site you want to deploy.
+2. In the site's build and deployment settings, link the repository under continuous deployment.
+3. Select `main` as the production branch and use the repository root as the publish directory. No build command is needed.
+4. Save the settings and trigger the initial deploy. Future pushes to `main` will deploy automatically; pull requests can receive deploy previews.
+
+Netlify must be authorized to access the GitHub repository. Do not add Netlify access tokens to the repository.
+
 ## Privacy
 
 All challenges and progress are stored in your browser's local storage. Questify does not send personal data to a server.
