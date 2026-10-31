@@ -43,6 +43,15 @@ const CONFIG = {
   HABIT_COMPLETION_XP: 5,
 };
 
+const APP_THEMES = [
+  { id: "aurora", name: "Aurora", description: "Fresh mint and sea glass", color: "#eaf5f2", swatches: ["#eaf5f2", "#62c7a6", "#176d65"] },
+  { id: "ocean", name: "Ocean", description: "Deep blue with bright aqua", color: "#071b2c", swatches: ["#071b2c", "#38bdf8", "#0f6b8f"] },
+  { id: "forest", name: "Forest", description: "Soft sage and evergreen", color: "#edf4e9", swatches: ["#edf4e9", "#8dbb75", "#3f6b43"] },
+  { id: "sunset", name: "Sunset", description: "Warm sand and coral", color: "#fff1e6", swatches: ["#fff1e6", "#fb8b68", "#a94e37"] },
+  { id: "lavender", name: "Lavender", description: "Dusk violet and lilac", color: "#1d1830", swatches: ["#1d1830", "#c4a7ff", "#7251b5"] },
+  { id: "midnight", name: "Midnight", description: "Ink and soft gold", color: "#111827", swatches: ["#111827", "#fbbf24", "#9a6f18"] },
+];
+
 function getDefaultState() {
   return {
     user: {
@@ -60,7 +69,7 @@ function getDefaultState() {
     unlockedBadgeIds: [],
     notifications: [],
     preferences: {
-      theme: "light",
+      theme: "aurora",
       soundEnabled: true,
       hapticsEnabled: true,
       remindersEnabled: false,
@@ -89,6 +98,12 @@ function loadState() {
     if (raw) {
       const savedState = JSON.parse(raw);
       const defaultState = getDefaultState();  // Call once for efficiency
+      const savedTheme = savedState.preferences?.theme;
+      const migratedTheme = savedTheme === "dark"
+        ? "midnight"
+        : savedTheme === "light"
+        ? "aurora"
+        : savedTheme;
       state = {
         ...defaultState,
         ...savedState,
@@ -115,6 +130,9 @@ function loadState() {
         preferences: {
           ...defaultState.preferences,
           ...savedState.preferences,
+          theme: APP_THEMES.some((theme) => theme.id === migratedTheme)
+            ? migratedTheme
+            : defaultState.preferences.theme,
         },
       };
       console.log("Loaded existing state from localStorage.");
@@ -210,20 +228,38 @@ function toggleHeaderVisibility() {
 // Theme
 // -------------------------------------
 function applyTheme() {
-  const theme = state.preferences.theme;
-  const activeTheme = theme === "light" ? "light" : "dark";
+  const activeTheme = APP_THEMES.some((theme) => theme.id === state.preferences.theme)
+    ? state.preferences.theme
+    : "aurora";
   document.documentElement.setAttribute("data-theme", activeTheme);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
   if (themeColorMeta) {
-    themeColorMeta.content = activeTheme === "light" ? "#f5f7fb" : "#0d1220";
+    themeColorMeta.content = APP_THEMES.find((theme) => theme.id === activeTheme).color;
   }
 }
 
-function toggleTheme() {
-  state.preferences.theme = state.preferences.theme === "light" ? "dark" : "light";
+function setTheme(themeId) {
+  if (!APP_THEMES.some((theme) => theme.id === themeId)) {
+    console.error(`Cannot apply unknown theme: "${themeId}".`);
+    return;
+  }
+  state.preferences.theme = themeId;
   saveState();
   applyTheme();
   renderView();
+}
+
+function getReminderPermissionMessage() {
+  if (typeof Notification === "undefined") {
+    return "Browser notifications are not supported here.";
+  }
+  if (Notification.permission === "denied") {
+    return "Blocked by your browser. Change this site's notification permission in browser settings.";
+  }
+  if (Notification.permission === "granted") {
+    return "Allowed by your browser. Questify can show one daily reminder while the app checks your challenges.";
+  }
+  return "Turning this on asks your browser for permission before any reminder is sent.";
 }
 
 // -------------------------------------
@@ -1701,10 +1737,10 @@ const BADGES = [
   {
     id: "theme-switcher",
     tier: "hard",
-    name: "New Look",
-    description: "Switch to light theme",
+    name: "Palette Explorer",
+    description: "Choose a new color theme",
     icon: "🌗",
-    condition: (s) => s.preferences.theme === "light",
+    condition: (s) => s.preferences.theme !== "aurora",
   },
   {
     id: "reminder-enabled",
@@ -2312,16 +2348,16 @@ function checkDailyReminder() {
 }
 
 async function enableReminders() {
-  if (typeof Notification === "undefined") {
-    showToast("⚠️ Notifications aren't supported on this browser.");
-    return false;
-  }
+  if (typeof Notification === "undefined") return false;
 
-  const permission = await Notification.requestPermission();
-  if (permission !== "granted") {
-    showToast("Reminders need notification permission to work.");
+  let permission;
+  try {
+    permission = await Notification.requestPermission();
+  } catch (error) {
+    console.error("Could not request notification permission:", error);
     return false;
   }
+  if (permission !== "granted") return false;
 
   state.preferences.remindersEnabled = true;
   saveState();
@@ -3289,7 +3325,7 @@ function renderLockInPanel() {
         <div class="lockin-focus-controls">
           <div class="lockin-focus-controls__copy">
             <strong>Quiet focus</strong>
-            <span class="text-muted">Pause app notifications during this session</span>
+            <span class="text-muted">Mute Questify alerts and reminders; other apps and system alerts are unaffected.</span>
           </div>
           <div
             id="lockin-notifications-switch"
@@ -3952,6 +3988,7 @@ const views = {
   `,
   settings: () => `
     <h2>Settings</h2>
+    <p class="settings-intro">Make Questify feel right for you. Your choices are saved on this device.</p>
 
     ${renderInstallSection()}
 
@@ -3965,24 +4002,32 @@ const views = {
       </div>
     </div>
 
-    <div class="settings-section card">
-      <div class="settings-row">
-        <div>
-          <div>Light Theme</div>
-          <div class="text-muted">Switch between dark and light appearance</div>
-        </div>
-        <div
-          id="theme-switch"
-          class="theme-switch ${state.preferences.theme === "light" ? "is-on" : ""}"
-          role="switch"
-          aria-checked="${state.preferences.theme === "light"}"
-          aria-label="Toggle light theme"
-          tabindex="0"
-        >
-          <div class="theme-switch__knob"></div>
-        </div>
+    <section class="settings-section card settings-theme-card" aria-labelledby="theme-picker-title">
+      <div class="settings-card-heading">
+        <h3 id="theme-picker-title">Choose your look</h3>
+        <p class="text-muted">Six distinct color palettes. Your selection is saved on this device.</p>
       </div>
-    </div>
+      <div class="theme-picker" role="group" aria-label="Color themes">
+        ${APP_THEMES.map((theme) => `
+          <button
+            class="theme-option ${state.preferences.theme === theme.id ? "is-selected" : ""}"
+            type="button"
+            data-theme-choice="${theme.id}"
+            aria-pressed="${state.preferences.theme === theme.id}"
+          >
+            <span class="theme-option__preview" aria-hidden="true">
+              <i style="background-color: ${theme.swatches[0]}"></i>
+              <i style="background-color: ${theme.swatches[1]}"></i>
+              <i style="background-color: ${theme.swatches[2]}"></i>
+            </span>
+            <span class="theme-option__copy">
+              <span class="theme-option__name">${theme.name}</span>
+              <span class="theme-option__description">${theme.description}</span>
+            </span>
+          </button>
+        `).join("")}
+      </div>
+    </section>
 
     <div class="settings-section card">
       <div class="settings-row">
@@ -4001,7 +4046,11 @@ const views = {
       </div>
     </div>
 
-    <div class="settings-section card">
+    <section class="settings-section card" aria-labelledby="settings-feedback-title">
+      <div class="settings-card-heading">
+        <h3 id="settings-feedback-title">Notifications &amp; feedback</h3>
+        <p class="text-muted">Choose what Questify can send and how it responds.</p>
+      </div>
       <div class="settings-row">
         <div>
           <div>Sound Effects</div>
@@ -4037,7 +4086,8 @@ const views = {
       <div class="settings-row">
         <div>
           <div>Daily Reminders</div>
-          <div class="text-muted">Get a notification for challenges due today</div>
+          <div class="text-muted">${getReminderPermissionMessage()}</div>
+          <div class="text-muted">At most one browser notification per day for overdue or due-today challenges.</div>
         </div>
         <div
           id="reminders-switch"
@@ -4053,7 +4103,7 @@ const views = {
       <div class="settings-row">
         <div>
           <div>Quiet focus</div>
-          <div class="text-muted">Mute Questify notifications while a Lock In session is active</div>
+          <div class="text-muted">Mute Questify alerts and reminders during Lock In. Other apps and system alerts are not affected.</div>
         </div>
         <div
           id="block-notifications-switch"
@@ -4065,8 +4115,15 @@ const views = {
         >
           <div class="theme-switch__knob"></div>
         </div>
-      </div>
-    </div>
+      </section>
+
+      <section class="settings-section card settings-privacy-card" aria-labelledby="settings-privacy-title">
+        <div>
+          <h3 id="settings-privacy-title">Your privacy</h3>
+          <p class="text-muted">Habits, challenges, and progress stay in this browser. Read what Questify stores and how browser notifications work.</p>
+        </div>
+        <a class="btn-secondary btn-sm settings-privacy-link" href="privacy.html">Privacy policy</a>
+      </section>
 
     <div class="settings-section card">
       <div class="settings-row">
@@ -4639,19 +4696,9 @@ function attachSettingsHandlers() {
     updateAppBtn.addEventListener("click", () => updateApp(updateAppBtn));
   }
 
-  const themeSwitch = document.getElementById("theme-switch");
-  if (themeSwitch) {
-    themeSwitch.addEventListener("click", () => {
-      toggleTheme();
-    });
-
-    themeSwitch.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        toggleTheme();
-      }
-    });
-  }
+  document.querySelectorAll("[data-theme-choice]").forEach((themeButton) => {
+    themeButton.addEventListener("click", () => setTheme(themeButton.dataset.themeChoice));
+  });
 
   const goalInput = document.getElementById("daily-goal-input");
   if (goalInput) {
@@ -4703,8 +4750,17 @@ function attachSettingsHandlers() {
         renderView();
       } else {
         const granted = await enableReminders();
-        if (granted) showToast("Daily reminders enabled.");
         renderView();
+        if (granted) {
+          showToast("Daily reminders enabled.");
+        } else {
+          const message = typeof Notification === "undefined"
+            ? "Notifications aren't supported on this browser."
+            : Notification.permission === "denied"
+            ? "Notifications are blocked. Allow them for Questify in your browser settings."
+            : "Reminders need browser notification permission to work.";
+          showToast(message);
+        }
       }
     };
     remindersSwitch.addEventListener("click", toggleReminders);
@@ -4920,7 +4976,7 @@ function navigateTo(viewName, pushToHistory = true) {
   }
 
   if (pushToHistory) {
-    history.pushState({ view: destination }, "", `#${destination}`);
+    history.pushState({ view: destination }, "", `${window.location.pathname}${window.location.search}`);
   }
 
   renderView();
@@ -4964,7 +5020,10 @@ function init() {
   const hashView = window.location.hash.replace("#", "");
   const startingView =
     (hashView === "stats" ? "profile" : views[hashView] && hashView !== "tour" ? hashView : "dashboard");
-  navigateTo(startingView, true);
+  if (hashView) {
+    history.replaceState({ view: startingView }, "", `${window.location.pathname}${window.location.search}`);
+  }
+  navigateTo(startingView, false);
   console.log("Questify app initialized.");
 }
 
