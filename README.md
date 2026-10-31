@@ -5,10 +5,14 @@ Questify is an offline-first, gamified daily challenge and habit tracker. It hel
 ## Highlights
 
 - Create and complete daily challenges
+- Create daily habits and track check-ins across a weekly grid and calendar
 - Earn XP, build streaks, and unlock badges
-- Review activity in calendar and statistics views
+- Review combined habit and challenge activity in the calendar
+- See profile progress, XP, badges, and activity statistics together
+- Use optional quiet focus during timed Lock In sessions, with an exit warning and pause/recovery choices
 - Personalize the experience with profile and settings views
 - Works offline as a Progressive Web App (PWA)
+- Check for and install the latest PWA version from Settings
 - Stores data locally in the browser; no account or server is required
 
 ## Built with
