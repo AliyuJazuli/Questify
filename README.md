@@ -11,8 +11,8 @@ Questify is an offline-first, gamified daily challenge and habit tracker. It hel
 - See profile progress, XP, badges, and activity statistics together
 - Use optional quiet focus during timed Lock In sessions, with an exit warning and pause/recovery choices
 - Personalize the experience with profile and settings views
-- Choose from six independent color themes
-- Manage optional daily browser reminders and Questify-only quiet focus
+- Choose from six themes with distinct typography and visual treatments; Ocean is the default
+- Manage optional daily browser reminders and Questify-only quiet focus during Lock In
 - Works offline as a Progressive Web App (PWA)
 - Check for and install the latest PWA version from Settings
 - Stores data locally in the browser; no account or server is required
@@ -39,7 +39,7 @@ For example, using VS Code, install the **Live Server** extension and choose **O
 
 ## Deploy with Netlify
 
-Questify is a static site with no build step. The included `netlify.toml` configures Netlify to publish the repository root.
+Questify is a static site with no build step. The included `netlify.toml` configures Netlify to publish the repository root. The public URL configured for indexing is `https://hydev-questify.netlify.app/`; confirm that this Netlify site is active and connected to this repository before relying on automatic deploys.
 
 To deploy commits automatically, connect this GitHub repository (`AliyuJazuli/Questify`) to your Netlify site:
 
@@ -69,7 +69,11 @@ Google decides when and whether a submitted URL appears in search results; reque
 
 Questify stores the profile, habits, challenges, check-ins, and progress in the current browser's local storage. It has no account or Questify user-data backend, and data does not sync between devices. The service worker caches app files for offline use. See [Privacy Policy](./privacy.html) for details, including the Google Fonts resource loaded while online.
 
-Daily browser reminders are opt-in and require browser permission. Quiet focus can mute Questify alerts and reminders during a Lock In session; it cannot mute other apps or system-level alerts. Turn reminders off in Settings or revoke the site's permission in your browser/device settings.
+Daily browser reminders are opt-in and require browser notification permission. Quiet focus can mute Questify alerts and reminders during a Lock In session. A PWA cannot pause notifications from other apps or system-level alerts, and there is no browser permission that grants this ability. To silence all apps, turn on your device's Do Not Disturb/Focus mode separately; integrating that control would require a native app and platform APIs where available.
+
+The six themes intentionally change more than color: Ocean (default) uses crisp coastal glass and sans-serif typography; Aurora is airy, rounded glass; Forest uses botanical colors and serif typography; Sunset is warm and playful with rounded controls; Lavender pairs dusk colors with soft handwritten headings; Midnight uses a sharper, terminal-inspired display face and compact surfaces. Theme and Quiet Focus preferences are stored locally.
+
+The layout is designed mobile-first: the top navigation scrolls horizontally, cards and settings rows reflow to the viewport, and the weekly habit tracker keeps its seven daily check-ins visible on small screens.
 
 ## Roadmap
 
