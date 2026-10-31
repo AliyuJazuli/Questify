@@ -44,12 +44,12 @@ const CONFIG = {
 };
 
 const APP_THEMES = [
-  { id: "aurora", name: "Aurora", description: "Fresh mint and sea glass", color: "#eaf5f2", swatches: ["#eaf5f2", "#62c7a6", "#176d65"] },
-  { id: "ocean", name: "Ocean", description: "Deep blue with bright aqua", color: "#071b2c", swatches: ["#071b2c", "#38bdf8", "#0f6b8f"] },
-  { id: "forest", name: "Forest", description: "Soft sage and evergreen", color: "#edf4e9", swatches: ["#edf4e9", "#8dbb75", "#3f6b43"] },
-  { id: "sunset", name: "Sunset", description: "Warm sand and coral", color: "#fff1e6", swatches: ["#fff1e6", "#fb8b68", "#a94e37"] },
-  { id: "lavender", name: "Lavender", description: "Dusk violet and lilac", color: "#1d1830", swatches: ["#1d1830", "#c4a7ff", "#7251b5"] },
-  { id: "midnight", name: "Midnight", description: "Ink and soft gold", color: "#111827", swatches: ["#111827", "#fbbf24", "#9a6f18"] },
+  { id: "ocean", name: "Ocean", description: "Crisp coastal glass", color: "#071b2c", swatches: ["#071b2c", "#38bdf8", "#0f6b8f"] },
+  { id: "aurora", name: "Aurora", description: "Soft, airy sea glass", color: "#eaf5f2", swatches: ["#eaf5f2", "#62c7a6", "#176d65"] },
+  { id: "forest", name: "Forest", description: "Quiet botanical editorial", color: "#edf4e9", swatches: ["#edf4e9", "#8dbb75", "#3f6b43"] },
+  { id: "sunset", name: "Sunset", description: "Rounded, warm and playful", color: "#fff1e6", swatches: ["#fff1e6", "#fb8b68", "#a94e37"] },
+  { id: "lavender", name: "Lavender", description: "Dreamy, elegant dusk", color: "#1d1830", swatches: ["#1d1830", "#c4a7ff", "#7251b5"] },
+  { id: "midnight", name: "Midnight", description: "Sharp, focused terminal", color: "#111827", swatches: ["#111827", "#fbbf24", "#9a6f18"] },
 ];
 
 function getDefaultState() {
@@ -69,7 +69,7 @@ function getDefaultState() {
     unlockedBadgeIds: [],
     notifications: [],
     preferences: {
-      theme: "aurora",
+      theme: "ocean",
       soundEnabled: true,
       hapticsEnabled: true,
       remindersEnabled: false,
@@ -230,7 +230,7 @@ function toggleHeaderVisibility() {
 function applyTheme() {
   const activeTheme = APP_THEMES.some((theme) => theme.id === state.preferences.theme)
     ? state.preferences.theme
-    : "aurora";
+    : "ocean";
   document.documentElement.setAttribute("data-theme", activeTheme);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
   if (themeColorMeta) {
@@ -1740,7 +1740,7 @@ const BADGES = [
     name: "Palette Explorer",
     description: "Choose a new color theme",
     icon: "🌗",
-    condition: (s) => s.preferences.theme !== "aurora",
+    condition: (s) => s.preferences.theme !== "ocean",
   },
   {
     id: "reminder-enabled",
@@ -3325,7 +3325,7 @@ function renderLockInPanel() {
         <div class="lockin-focus-controls">
           <div class="lockin-focus-controls__copy">
             <strong>Quiet focus</strong>
-            <span class="text-muted">Mute Questify alerts and reminders; other apps and system alerts are unaffected.</span>
+            <span class="text-muted">Mute Questify alerts and reminders only; your device's other alerts are not controlled here.</span>
           </div>
           <div
             id="lockin-notifications-switch"
@@ -4005,7 +4005,7 @@ const views = {
     <section class="settings-section card settings-theme-card" aria-labelledby="theme-picker-title">
       <div class="settings-card-heading">
         <h3 id="theme-picker-title">Choose your look</h3>
-        <p class="text-muted">Six distinct color palettes. Your selection is saved on this device.</p>
+        <p class="text-muted">Six complete styles, each with its own typography and visual mood. Saved on this device.</p>
       </div>
       <div class="theme-picker" role="group" aria-label="Color themes">
         ${APP_THEMES.map((theme) => `
@@ -4103,7 +4103,7 @@ const views = {
       <div class="settings-row">
         <div>
           <div>Quiet focus</div>
-          <div class="text-muted">Mute Questify alerts and reminders during Lock In. Other apps and system alerts are not affected.</div>
+          <div class="text-muted">Mute Questify alerts and reminders during Lock In. This web app cannot silence other apps or system alerts.</div>
         </div>
         <div
           id="block-notifications-switch"
@@ -4115,6 +4115,10 @@ const views = {
         >
           <div class="theme-switch__knob"></div>
         </div>
+      </div>
+      <p class="system-notifications-note">
+        To pause notifications from every app, turn on your device's Do Not Disturb or Focus mode separately. Browsers do not provide web apps permission to control system-wide notifications.
+      </p>
       </section>
 
       <section class="settings-section card settings-privacy-card" aria-labelledby="settings-privacy-title">
@@ -4945,6 +4949,18 @@ function updateActiveNavButton() {
       btn.setAttribute("aria-current", "page");
     } else {
       btn.removeAttribute("aria-current");
+    }
+    if (isActive && window.matchMedia("(max-width: 767px)").matches) {
+      const nav = btn.closest(".app-nav");
+      if (!nav) return;
+      const buttonRect = btn.getBoundingClientRect();
+      const navRect = nav.getBoundingClientRect();
+      const centeredLeft = nav.scrollLeft + buttonRect.left - navRect.left -
+        (nav.clientWidth - btn.offsetWidth) / 2;
+      nav.scrollTo({
+        left: Math.max(0, centeredLeft),
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
     }
   });
 }
