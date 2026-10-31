@@ -2,11 +2,12 @@
 // the old cache instead of serving stale assets. This must change on every
 // deploy - a byte-identical service-worker.js never triggers a browser
 // update check, so the old cache (and old app code) would be served forever.
-const CACHE_NAME = "questify-cache-v13";
+const CACHE_NAME = "questify-cache-v17";
 
 const APP_SHELL = [
   "./",
   "./index.html",
+  "./privacy.html",
   "./style.css",
   "./script.js",
   "./manifest.json",
@@ -17,6 +18,7 @@ const APP_SHELL = [
   "./apple-touch-icon.png",
   "./icon-192.png",
   "./icon-512.png",
+  "./social-preview.png",
 ];
 
 self.addEventListener("install", (event) => {

@@ -1,13 +1,14 @@
 {
   "name": "Questify",
   "short_name": "Questify",
-  "description": "An offline-first, gamified daily challenge and habit tracker.",
-  "start_url": "./index.html",
-  "scope": "./",
+  "id": "/",
+  "description": "Build daily habits, track challenges, and stay focused with streaks, XP, badges, and a weekly calendar.",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#f5f7fb",
-  "theme_color": "#f5f7fb",
+  "background_color": "#eaf5f2",
+  "theme_color": "#eaf5f2",
   "icons": [
     {
       "src": "favicon.png",
