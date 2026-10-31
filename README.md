@@ -39,7 +39,7 @@ For example, using VS Code, install the **Live Server** extension and choose **O
 
 ## Deploy with Netlify
 
-Questify is a static site with no build step. The included `netlify.toml` configures Netlify to publish the repository root. The public URL configured for indexing is `https://hydev-questify.netlify.app/`; confirm that this Netlify site is active and connected to this repository before relying on automatic deploys.
+Questify is a static site with no build step. The included `netlify.toml` configures Netlify to publish the repository root. The public URL configured for indexing is `https://questify-hydev.netlify.app/`; confirm that this Netlify site is active and connected to this repository before relying on automatic deploys.
 
 To deploy commits automatically, connect this GitHub repository (`AliyuJazuli/Questify`) to your Netlify site:
 
@@ -52,15 +52,15 @@ Netlify must be authorized to access the GitHub repository. Do not add Netlify a
 
 ## Search indexing and social sharing
 
-The public app URL is `https://hydev-questify.netlify.app/`. The page defines its canonical URL, search description, Open Graph and X/Twitter share metadata, and `WebApplication` structured data in `index.html`. The social preview uses the 1200 x 630 `social-preview.png` image.
+The public app URL is `https://questify-hydev.netlify.app/`. The page defines its canonical URL, search description, Open Graph and X/Twitter share metadata, and `WebApplication` structured data in `index.html`. The social preview uses the 1200 x 630 `social-preview.png` image.
 
 The root `robots.txt` allows crawlers and points to `sitemap.xml`, which lists the app and its privacy policy. App views use client-side navigation and are not separate indexable pages; shared links and the canonical URL should use the root URL without a `#login` or other view fragment.
 
 After deploying changes:
 
-1. In Google Search Console, add and verify the URL-prefix property `https://hydev-questify.netlify.app/` if it is not already available. A different Netlify site or portfolio property does not verify this app URL.
-2. Submit `https://hydev-questify.netlify.app/sitemap.xml` under **Sitemaps**.
-3. Use **URL inspection** on `https://hydev-questify.netlify.app/`, run a live test, then request indexing if Google reports that the page can be indexed.
+1. In Google Search Console, add and verify the URL-prefix property `https://questify-hydev.netlify.app/` if it is not already available. A different Netlify site or portfolio property does not verify this app URL.
+2. Submit `https://questify-hydev.netlify.app/sitemap.xml` under **Sitemaps**.
+3. Use **URL inspection** on `https://questify-hydev.netlify.app/`, run a live test, then request indexing if Google reports that the page can be indexed.
 4. Preview shared metadata with a social card debugger after deployment. Social profile links are not displayed because none have been supplied.
 
 Google decides when and whether a submitted URL appears in search results; requesting indexing is not a guarantee of inclusion or ranking.

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://hydev-questify.netlify.app/sitemap.xml
+Sitemap: https://questify-hydev.netlify.app/sitemap.xml
