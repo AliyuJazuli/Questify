@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="ocean">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="index, follow">
+  <meta name="description" content="Terms of Service for using Questify, its local productivity tools, and optional browser notifications.">
+  <link rel="canonical" href="https://questify-hydev.netlify.app/terms.html">
+  <meta name="theme-color" content="#071b2c">
+  <title>Terms of Service — Questify</title>
+  <link rel="stylesheet" href="style.css">
+  <script>
+    try {
+      const saved = JSON.parse(localStorage.getItem("questify_state") || "{}");
+      const theme = saved.preferences && saved.preferences.theme;
+      if (["ocean", "aurora", "forest", "sunset", "lavender", "midnight"].includes(theme)) {
+        document.documentElement.dataset.theme = theme;
+      }
+    } catch (error) {
+      console.error("Could not load the saved Questify theme for this document:", error);
+    }
+  </script>
+</head>
+<body>
+  <main class="privacy-main">
+    <header class="privacy-header">
+      <a class="app-header__logo legal-brand" href="./"><img src="logo.svg" alt="" width="32" height="32">Questify</a>
+      <a class="btn-secondary btn-sm" href="./">Back to Questify</a>
+    </header>
+
+    <article class="card privacy-content">
+      <header>
+        <p class="dashboard-section__eyebrow">Using the app</p>
+        <h1>Terms of Service</h1>
+        <p>These terms describe the current Questify app and the expectations for using it. Version 1.0.</p>
+      </header>
+
+      <section>
+        <h2>About Questify</h2>
+        <p>Questify is an offline-capable productivity and habit-tracking app. Its challenges, habits, calendar, XP, levels, badges, and focus timer are personal tracking and motivation tools. XP and badges are in-app progress indicators and have no cash or exchange value.</p>
+      </section>
+
+      <section>
+        <h2>Your device and your data</h2>
+        <p>Questify does not require an account and does not synchronize your profile or progress to a Questify user-data service. App data is stored in this browser on this device. You are responsible for keeping any separate records you need; clearing site data or losing access to this device may remove your local progress. See the <a href="privacy.html">Privacy Policy</a> for details.</p>
+      </section>
+
+      <section>
+        <h2>Use of the app</h2>
+        <p>Use Questify for your own planning and progress tracking. Keep your device and browser up to date, and do not attempt to disrupt the app or use it to interfere with another person's device or data.</p>
+      </section>
+
+      <section>
+        <h2>Notifications and focus tools</h2>
+        <p>Browser reminders are optional and depend on browser permission and support. Quiet Focus can suppress Questify's own notifications during a focus session. A PWA cannot silence notifications from other apps or change your device's system-wide Do Not Disturb or Focus settings; manage those controls through your device.</p>
+      </section>
+
+      <section>
+        <h2>Availability and updates</h2>
+        <p>Questify is delivered as a website and PWA. Offline availability depends on the files previously cached by your browser. Features and app files may be updated; use the in-app update control while online to check for a newer version.</p>
+      </section>
+
+      <section>
+        <h2>Changes to these terms</h2>
+        <p>These terms describe the app's current behavior and may be updated when the app or its practices change. The version and effective date will be updated with a material revision. Questify will ask for acceptance again when the required document version changes.</p>
+      </section>
+
+      <p class="legal-document-footer">Also see the <a href="privacy.html">Privacy Policy</a>.</p>
+    </article>
+  </main>
+</body>
+</html>
