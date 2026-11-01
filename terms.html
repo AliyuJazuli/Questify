@@ -1,25 +1,15 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="ocean">
+<html lang="en" data-theme="sunset">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="index, follow">
   <meta name="description" content="Terms of Service for using Questify, its local productivity tools, and optional browser notifications.">
   <link rel="canonical" href="https://questify-hydev.netlify.app/terms.html">
-  <meta name="theme-color" content="#071b2c">
+  <meta name="theme-color" content="#fff1e6">
   <title>Terms of Service — Questify</title>
   <link rel="stylesheet" href="style.css">
-  <script>
-    try {
-      const saved = JSON.parse(localStorage.getItem("questify_state") || "{}");
-      const theme = saved.preferences && saved.preferences.theme;
-      if (["ocean", "aurora", "forest", "sunset", "lavender", "midnight"].includes(theme)) {
-        document.documentElement.dataset.theme = theme;
-      }
-    } catch (error) {
-      console.error("Could not load the saved Questify theme for this document:", error);
-    }
-  </script>
+  <script src="legal-theme.js"></script>
 </head>
 <body>
   <main class="privacy-main">
@@ -53,6 +43,7 @@
       <section>
         <h2>Notifications and focus tools</h2>
         <p>Browser reminders are optional and depend on browser permission and support. Quiet Focus can suppress Questify's own notifications during a focus session. A PWA cannot silence notifications from other apps or change your device's system-wide Do Not Disturb or Focus settings; manage those controls through your device.</p>
+        <p>Pinned notes stay above Questify pages. Some desktop browsers support a separate floating Picture-in-Picture note, but the browser controls its availability and placement; this does not guarantee that the note stays above every window or application.</p>
       </section>
 
       <section>
