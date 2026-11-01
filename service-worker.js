@@ -2,7 +2,7 @@
 // the old cache instead of serving stale assets. This must change on every
 // deploy - a byte-identical service-worker.js never triggers a browser
 // update check, so the old cache (and old app code) would be served forever.
-const CACHE_NAME = "questify-cache-v45";
+const CACHE_NAME = "questify-cache-v49";
 
 const APP_SHELL = [
   "./",
@@ -30,8 +30,13 @@ self.addEventListener("install", (event) => {
     caches
       .open(CACHE_NAME)
       .then((cache) => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener("activate", (event) => {

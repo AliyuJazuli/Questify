@@ -25,6 +25,26 @@ if (!appRoot || !mainEl) {
   console.error("Fatal: required app containers not found in HTML.");
 }
 
+function syncAppFloatingWidgetNote() {
+  const widget = getFloatingWidget("note");
+  if (widget?.ownerId !== appWindowId || widget.mode !== "app") return;
+  const pinnedNote = widget.kind === "saved"
+    ? state.notes.find((item) => item.id === widget.id)
+    : null;
+  const label = document.querySelector(".app-floating-note .app-floating-widget__header label");
+  if (label && pinnedNote) label.textContent = pinnedNote.title || "STICKY NOTE";
+  const input = document.getElementById(
+    widget.kind === "session" ? "floating-session-note-content" : "floating-saved-note-content"
+  );
+  if (!input || document.activeElement === input) return;
+  if (widget.kind === "session") {
+    input.value = getActiveLockIn()?.sessionNote || "";
+    return;
+  }
+  const note = state.notes.find((item) => item.id === widget.id);
+  if (note) input.value = note.content;
+}
+
 // -------------------------------------
 // State: single source of truth
 // -------------------------------------
@@ -34,9 +54,18 @@ const initialUrlParams = new URLSearchParams(window.location.search);
 const isLockInFocusWindow = initialUrlParams.get("focus") === "lockin";
 const stickyNoteWindowId = initialUrlParams.get("note");
 const isStickyNoteWindow = Boolean(stickyNoteWindowId);
+const isLockInTimerWindow = initialUrlParams.get("timer") === "lockin";
+const sessionNoteWindowId = initialUrlParams.get("session-note");
+const isSessionNoteWindow = Boolean(sessionNoteWindowId);
+const FLOATING_WIDGETS_STORAGE_KEY = "questify_floating_widgets";
+const appWindowId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const lockInStateChannel = "BroadcastChannel" in window
   ? new BroadcastChannel("questify-lockin-state")
   : null;
+let floatingWidgetHeartbeatId = null;
+let appUpdatePrompt = null;
+let shouldReloadForAppUpdate = false;
+let appUpdateActivationTimeoutId = null;
 
 // -------------------------------------
 // App-wide configuration constants
@@ -92,11 +121,6 @@ function getDefaultState() {
       lockInNoteColor: "#fff1a8",
       sidebarCollapsed: false,
       navigationMode: "auto",
-      floatingLockInTimer: false,
-      floatingSessionNote: false,
-      floatingNoteId: null,
-      floatingTimerPosition: null,
-      floatingNotePosition: null,
     },
   };
 }
@@ -106,6 +130,93 @@ let state = getDefaultState();
 // -------------------------------------
 // Persistence: save/load from localStorage
 // -------------------------------------
+function getFloatingWidgets() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(FLOATING_WIDGETS_STORAGE_KEY) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch (error) {
+    console.error("Could not read floating widget state:", error);
+    return {};
+  }
+}
+
+function getFloatingWidget(kind) {
+  const widget = getFloatingWidgets()[kind];
+  if (!widget || typeof widget !== "object" ||
+      !Number.isFinite(widget.expiresAt) || widget.expiresAt <= Date.now()) return null;
+  return widget;
+}
+
+function isLockInTimerPinned() {
+  const active = getActiveLockIn();
+  const widget = getFloatingWidget("timer");
+  return Boolean(active && widget && widget.id === active.id);
+}
+
+function ownsFloatingWidget(kind, mode = null) {
+  const widget = getFloatingWidget(kind);
+  return Boolean(widget && widget.ownerId === appWindowId && (!mode || widget.mode === mode));
+}
+
+function saveFloatingWidgets(widgets) {
+  try {
+    localStorage.setItem(FLOATING_WIDGETS_STORAGE_KEY, JSON.stringify(widgets));
+    lockInStateChannel?.postMessage({ type: "floating-widgets-updated" });
+  } catch (error) {
+    console.error("Could not save floating widget state:", error);
+    showToast("Questify could not save the floating window state.");
+  }
+}
+
+function setFloatingWidget(kind, details) {
+  const widgets = getFloatingWidgets();
+  if (!details) {
+    delete widgets[kind];
+  } else {
+    widgets[kind] = {
+      ...details,
+      ownerId: appWindowId,
+      expiresAt: Date.now() + 120000,
+    };
+  }
+  saveFloatingWidgets(widgets);
+
+  if (details && !floatingWidgetHeartbeatId) {
+    floatingWidgetHeartbeatId = setInterval(() => {
+      const currentWidgets = getFloatingWidgets();
+      let changed = false;
+      Object.keys(currentWidgets).forEach((widgetKind) => {
+        const widget = currentWidgets[widgetKind];
+        if (widget?.ownerId === appWindowId && widget.expiresAt - Date.now() < 90000) {
+          widget.expiresAt = Date.now() + 120000;
+          changed = true;
+        }
+      });
+      if (changed) saveFloatingWidgets(currentWidgets);
+    }, 30000);
+  } else if (!details && floatingWidgetHeartbeatId &&
+      !Object.values(getFloatingWidgets()).some((widget) => widget?.ownerId === appWindowId)) {
+    clearInterval(floatingWidgetHeartbeatId);
+    floatingWidgetHeartbeatId = null;
+  }
+}
+
+function clearOwnedFloatingWidgets() {
+  if (floatingWidgetHeartbeatId) clearInterval(floatingWidgetHeartbeatId);
+  floatingWidgetHeartbeatId = null;
+  const widgets = getFloatingWidgets();
+  let changed = false;
+  Object.keys(widgets).forEach((kind) => {
+    if (widgets[kind]?.ownerId === appWindowId) {
+      delete widgets[kind];
+      changed = true;
+    }
+  });
+  if (changed) saveFloatingWidgets(widgets);
+}
+
+window.addEventListener("pagehide", clearOwnedFloatingWidgets);
+
 function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -114,16 +225,6 @@ function saveState() {
   } catch (err) {
     console.error("Failed to save state:", err);
   }
-}
-
-function normalizeFloatingPosition(position) {
-  if (!position || typeof position !== "object") return null;
-  const { x, y } = position;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return {
-    x: Math.max(0, Math.min(10000, Math.round(x))),
-    y: Math.max(0, Math.min(10000, Math.round(y))),
-  };
 }
 
 function loadState() {
@@ -222,13 +323,6 @@ function loadState() {
           lockInNoteColor: /^#[0-9a-f]{6}$/i.test(savedState.preferences?.lockInNoteColor || "")
             ? savedState.preferences.lockInNoteColor
             : defaultState.preferences.lockInNoteColor,
-          floatingLockInTimer: Boolean(savedState.preferences?.floatingLockInTimer),
-          floatingSessionNote: Boolean(savedState.preferences?.floatingSessionNote),
-          floatingNoteId: typeof savedState.preferences?.floatingNoteId === "string"
-            ? savedState.preferences.floatingNoteId
-            : null,
-          floatingTimerPosition: normalizeFloatingPosition(savedState.preferences?.floatingTimerPosition),
-          floatingNotePosition: normalizeFloatingPosition(savedState.preferences?.floatingNotePosition),
           theme: APP_THEMES.some((theme) => theme.id === migratedTheme)
             ? migratedTheme
             : defaultState.preferences.theme,
@@ -284,6 +378,10 @@ let isSidebarCollapsed = false;
 let isMobileNavigationOpen = false;
 let lockInPictureInPictureWindow = null;
 let lockInPictureInPictureInterval = null;
+let sessionNotePictureInPictureWindow = null;
+let savedNotePictureInPictureWindow = null;
+let lockInTimerPopupWindow = null;
+let sessionNotePopupWindow = null;
 
 function getLockInSyncSignature() {
   const active = getActiveLockIn();
@@ -303,8 +401,6 @@ function getNotesSyncSignature() {
     active?.sessionNote || "",
     active?.sessionNoteColor || "",
     active?.savedNoteId || "",
-    state.preferences.floatingNoteId || "",
-    state.preferences.floatingSessionNote || false,
   ]);
 }
 
@@ -319,20 +415,32 @@ function handleLockInStateSync() {
   applyTheme();
   const sessionChanged = previousSignature !== getLockInSyncSignature();
   const notesChanged = previousNotesSignature !== getNotesSyncSignature();
+  syncSessionNotePictureInPicture();
+  syncSavedNotePictureInPicture();
   if (!noteIsFocused && (
     isLockInFocusWindow ||
     isStickyNoteWindow ||
+    isLockInTimerWindow ||
+    isSessionNoteWindow ||
     (sessionChanged && ["challenges", "dashboard", "lockin"].includes(currentView)) ||
     (notesChanged && currentView === "notes")
   )) {
     renderView();
   } else {
     syncSessionNoteInput();
-    if (!noteIsFocused) renderFloatingWidgets();
   }
 }
 
-lockInStateChannel?.addEventListener("message", handleLockInStateSync);
+lockInStateChannel?.addEventListener("message", (event) => {
+  if (event.data?.type === "floating-widgets-updated") {
+    if (isLockInFocusWindow || isStickyNoteWindow || isLockInTimerWindow ||
+        isSessionNoteWindow || ["challenges", "lockin"].includes(currentView)) {
+      renderView();
+    }
+    return;
+  }
+  handleLockInStateSync();
+});
 window.addEventListener("storage", (event) => {
   if (event.key === STORAGE_KEY) handleLockInStateSync();
 });
@@ -751,6 +859,29 @@ function getCategoryCompletionCounts(s = state) {
   getCompletedChallenges(s).forEach((c) => {
     const cat = c.category || "general";
     counts[cat] = (counts[cat] || 0) + 1;
+  });
+  return counts;
+}
+
+function getHabitCompletionCountsByDifficulty(s = state) {
+  const counts = { easy: 0, medium: 0, hard: 0 };
+  (s.habits || []).forEach((habit) => {
+    const hasDifficulty = Object.prototype.hasOwnProperty.call(
+      CONFIG.HABIT_XP_REWARDS,
+      habit.difficulty
+    );
+    const difficulty = hasDifficulty ? habit.difficulty : "medium";
+    counts[difficulty] += Array.isArray(habit.completedDates) ? habit.completedDates.length : 0;
+  });
+  return counts;
+}
+
+function getHabitCategoryCompletionCounts(s = state) {
+  const counts = {};
+  (s.habits || []).forEach((habit) => {
+    const category = getHabitCategoryId(habit.category);
+    counts[category] = (counts[category] || 0) +
+      (Array.isArray(habit.completedDates) ? habit.completedDates.length : 0);
   });
   return counts;
 }
@@ -1349,33 +1480,29 @@ function finishLockIn(id) {
   const elapsedSec = getLockInElapsedSeconds(challenge);
   challenge.actualMinutes = Math.max(1, Math.round(elapsedSec / 60));
   challenge.xpValue = computeLockInXp(challenge.targetMinutes, challenge.actualMinutes, challenge.difficulty);
-  const savedNoteId = challenge.savedNoteId;
   delete challenge.sessionNote;
   delete challenge.sessionNoteColor;
   delete challenge.savedNoteId;
-  state.preferences.floatingLockInTimer = false;
-  if (state.preferences.floatingSessionNote) {
-    state.preferences.floatingSessionNote = false;
-    state.preferences.floatingNoteId = savedNoteId || null;
-  }
   completeChallenge(id);
   stopLockInTicker();
   closeLockInPictureInPicture();
+  if (getFloatingWidget("timer")?.id === id) setFloatingWidget("timer", null);
+  closeSessionNotePictureInPicture();
+  if (getFloatingWidget("note")?.kind === "session" && getFloatingWidget("note")?.id === id) {
+    setFloatingWidget("note", null);
+  }
 }
 
 function cancelLockIn(id) {
   const active = state.challenges.find((challenge) => challenge.id === id);
-  if (active) {
-    const savedNoteId = active.savedNoteId;
-    state.preferences.floatingLockInTimer = false;
-    if (state.preferences.floatingSessionNote) {
-      state.preferences.floatingSessionNote = false;
-      state.preferences.floatingNoteId = savedNoteId || null;
-    }
-  }
   deleteChallenge(id);
   stopLockInTicker();
   closeLockInPictureInPicture();
+  if (getFloatingWidget("timer")?.id === id) setFloatingWidget("timer", null);
+  closeSessionNotePictureInPicture();
+  if (getFloatingWidget("note")?.kind === "session" && getFloatingWidget("note")?.id === id) {
+    setFloatingWidget("note", null);
+  }
 }
 
 function setBlockNotificationsDuringLockIn(enabled) {
@@ -1421,7 +1548,11 @@ function updateLockInTimerDisplay() {
       statusEl.classList.toggle("is-paused", active.isPaused);
     }
     if (progressEl) {
-      progressEl.style.strokeDashoffset = "0";
+      if (progressEl.tagName.toLowerCase() === "circle") {
+        progressEl.style.strokeDashoffset = "0";
+      } else {
+        progressEl.style.width = "100%";
+      }
       progressEl.closest("svg")?.setAttribute("aria-valuenow", "100");
     }
 
@@ -1439,7 +1570,11 @@ function updateLockInTimerDisplay() {
       statusEl.classList.toggle("is-paused", active.isPaused);
     }
     if (progressEl) {
-      progressEl.style.strokeDashoffset = String(circumference * (1 - progressPercent / 100));
+      if (progressEl.tagName.toLowerCase() === "circle") {
+        progressEl.style.strokeDashoffset = String(circumference * (1 - progressPercent / 100));
+      } else {
+        progressEl.style.width = `${progressPercent}%`;
+      }
       progressEl.closest("svg")?.setAttribute("aria-valuenow", String(Math.round(progressPercent)));
     }
   }
@@ -1447,7 +1582,16 @@ function updateLockInTimerDisplay() {
   const xpEl = document.getElementById("lockin-xp-preview");
   if (xpEl) xpEl.textContent = `~${projectedXp} XP so far`;
   updateLockInPictureInPicture(active, elapsedSec);
-  updateFloatingTimerDisplay();
+  const floatingTimer = document.getElementById("floating-lockin-timer-value");
+  if (floatingTimer) {
+    floatingTimer.textContent = active.isPaused
+      ? `Paused · ${formatLockInClock(remainingSec)}`
+      : remainingSec > 0
+      ? `${formatLockInClock(remainingSec)} remaining`
+      : `${formatLockInClock(overBy)} overtime`;
+  }
+  const floatingPause = document.querySelector("[data-floating-timer-pause]");
+  if (floatingPause) floatingPause.textContent = active.isPaused ? "Resume" : "Pause";
 }
 
 function startLockInTicker() {
@@ -1530,7 +1674,7 @@ function attachLockInExitDialogHandlers() {
 }
 
 window.addEventListener("beforeunload", (event) => {
-  if (isLockInFocusWindow && window.opener && !window.opener.closed) return;
+  if (isLockInFocusWindow || isStickyNoteWindow || isLockInTimerWindow || isSessionNoteWindow) return;
   const active = getActiveLockIn();
   if (!active || active.isPaused) return;
 
@@ -1539,7 +1683,7 @@ window.addEventListener("beforeunload", (event) => {
 });
 
 window.addEventListener("pagehide", () => {
-  if (isLockInFocusWindow && window.opener && !window.opener.closed) return;
+  if (isLockInFocusWindow || isStickyNoteWindow || isLockInTimerWindow || isSessionNoteWindow) return;
   handleLockInPageHide();
 });
 window.addEventListener("pageshow", (event) => {
@@ -1668,7 +1812,7 @@ function updateStreak() {
 // recurring challenges, archiving, categories, weekly goals...); "hard"
 // ones are longer-run milestones and mastery goals.
 const BADGES = [
-  // ============= EASY (10) - quick wins that also introduce features =============
+  // ============= EASY (11) - quick wins that also introduce features =============
   {
     id: "first-challenge",
     tier: "easy",
@@ -1730,10 +1874,13 @@ const BADGES = [
     id: "category-explorer",
     tier: "easy",
     name: "Explorer",
-    description: "Complete challenges in 3 different categories",
+    description: "Complete challenges or habits in 3 different categories",
     icon: "🧭",
     condition: (s) => {
-      const counts = getCategoryCompletionCounts(s);
+      const counts = { ...getCategoryCompletionCounts(s) };
+      Object.entries(getHabitCategoryCompletionCounts(s)).forEach(([category, total]) => {
+        counts[category] = (counts[category] || 0) + total;
+      });
       return Object.keys(counts).filter((k) => k !== "lockin").length >= 3;
     },
   },
@@ -1762,7 +1909,7 @@ const BADGES = [
     condition: (s) => getTotalHabitCompletions(s) >= 1,
   },
 
-  // ============= HARD (50) - longer-run milestones and mastery goals =============
+  // ============= HARD (53) - longer-run milestones and mastery goals =============
 
   // --- Challenge count milestones ---
   {
@@ -2009,44 +2156,47 @@ const BADGES = [
     id: "well-rounded",
     tier: "hard",
     name: "Well Rounded",
-    description: "Complete an Easy, Medium, and Hard challenge",
+    description: "Complete one Easy, Medium, and Hard challenge or habit check-in",
     icon: "🎯",
     condition: (s) => {
-      const counts = getCompletionCountByDifficulty(s);
-      return counts.easy >= 1 && counts.medium >= 1 && counts.hard >= 1;
+      const challengeCounts = getCompletionCountByDifficulty(s);
+      const habitCounts = getHabitCompletionCountsByDifficulty(s);
+      return ["easy", "medium", "hard"].every(
+        (difficulty) => challengeCounts[difficulty] + habitCounts[difficulty] >= 1
+      );
     },
   },
   {
     id: "easy-specialist",
     tier: "hard",
     name: "Easy Specialist",
-    description: "Complete 10 Easy challenges",
+    description: "Complete 10 Easy challenges or habit check-ins",
     icon: "🍀",
-    condition: (s) => getCompletionCountByDifficulty(s).easy >= 10,
+    condition: (s) => getCompletionCountByDifficulty(s).easy + getHabitCompletionCountsByDifficulty(s).easy >= 10,
   },
   {
     id: "medium-specialist",
     tier: "hard",
     name: "Medium Specialist",
-    description: "Complete 10 Medium challenges",
+    description: "Complete 10 Medium challenges or habit check-ins",
     icon: "🎲",
-    condition: (s) => getCompletionCountByDifficulty(s).medium >= 10,
+    condition: (s) => getCompletionCountByDifficulty(s).medium + getHabitCompletionCountsByDifficulty(s).medium >= 10,
   },
   {
     id: "hard-specialist",
     tier: "hard",
     name: "Hard Specialist",
-    description: "Complete 10 Hard challenges",
+    description: "Complete 10 Hard challenges or habit check-ins",
     icon: "🥋",
-    condition: (s) => getCompletionCountByDifficulty(s).hard >= 10,
+    condition: (s) => getCompletionCountByDifficulty(s).hard + getHabitCompletionCountsByDifficulty(s).hard >= 10,
   },
   {
     id: "hard-master",
     tier: "hard",
     name: "Hard Master",
-    description: "Complete 25 Hard challenges",
+    description: "Complete 25 Hard challenges or habit check-ins",
     icon: "🐺",
-    condition: (s) => getCompletionCountByDifficulty(s).hard >= 25,
+    condition: (s) => getCompletionCountByDifficulty(s).hard + getHabitCompletionCountsByDifficulty(s).hard >= 25,
   },
 
   // --- Time-based ---
@@ -2192,10 +2342,13 @@ const BADGES = [
     id: "category-balanced3",
     tier: "hard",
     name: "Well Balanced",
-    description: "Complete at least 3 challenges in every category",
+    description: "Complete at least 3 challenges or habit check-ins in every category",
     icon: "🎨",
     condition: (s) => {
-      const counts = getCategoryCompletionCounts(s);
+      const counts = { ...getCategoryCompletionCounts(s) };
+      Object.entries(getHabitCategoryCompletionCounts(s)).forEach(([category, total]) => {
+        counts[category] = (counts[category] || 0) + total;
+      });
       const topicCategories = Object.keys(CATEGORY_CONFIG).filter((id) => id !== "lockin");
       return topicCategories.every((cat) => (counts[cat] || 0) >= 3);
     },
@@ -4033,7 +4186,7 @@ function renderHabitTracker() {
               <tr>
                 <th scope="col" class="habit-week-table__habit-heading">Habit</th>
                 ${days.map((day) => `
-                  <th scope="col" class="${day.isToday ? "is-today" : ""}">
+                  <th scope="col" class="${day.isToday ? "is-today" : "is-other-day"}">
                     <span>${day.dayLabel}</span><strong>${day.dayNumber}</strong>
                   </th>
                 `).join("")}
@@ -4047,7 +4200,7 @@ function renderHabitTracker() {
                     ${renderHabitCategoryTag(habit.category)}
                   </th>
                   ${days.map((day) => `
-                    <td class="${day.isToday ? "is-today" : ""}">
+                    <td class="${day.isToday ? "is-today" : "is-other-day"}">
                       <span class="habit-week-table__day-label">${day.dayLabel.slice(0, 1)} ${day.dayNumber}</span>
                       ${renderHabitCheckButton(habit, day.dateStr)}
                     </td>
@@ -4156,10 +4309,14 @@ function renderLockInStickyNote() {
         <label class="lockin-sticky-note__custom">Custom<input id="lockin-note-color" type="color" value="${color}" aria-label="Choose a custom sticky note color"></label>
       </div>
       <div class="lockin-note-actions">
-        <button type="button" class="btn-secondary btn-sm" id="lockin-pin-note-btn">${state.preferences.floatingSessionNote ? "Unpin note" : "Pin note"}</button>
+        ${!isSessionNoteWindow
+          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">Open note pop-out ↗</button>`
+          : ""}
         <button type="button" class="btn-secondary btn-sm" id="lockin-save-note-btn">${savedNote ? "Update Sticky Notes" : "Save to Sticky Notes"}</button>
       </div>
-      <p class="lockin-note-hint text-muted">Unsaved notes disappear when this session ends.</p>
+      ${!isSessionNoteWindow
+        ? `<p class="lockin-note-hint text-muted">Open a separate note window to keep this note independent of the focus timer. Unsaved notes disappear when this session ends.</p>`
+        : `<p class="lockin-note-hint text-muted">Session-only note · saved automatically while this Lock In session is active.</p>`}
     </section>
   `;
 }
@@ -4183,12 +4340,8 @@ function updateLockInNoteColor(color) {
   if (colorInput) colorInput.value = color;
   const savedLabel = document.getElementById("lockin-note-saved");
   if (savedLabel && active.savedNoteId) savedLabel.textContent = "Session changes not saved to Sticky Notes";
-  const floatingNote = document.querySelector(".floating-widget--note");
-  if (floatingNote && state.preferences.floatingSessionNote) {
-    floatingNote.style.setProperty("--lockin-note-color", color);
-    floatingNote.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
-  }
   saveState();
+  syncSessionNotePictureInPicture();
 }
 
 function saveLockInNoteToLibrary() {
@@ -4226,231 +4379,108 @@ function saveLockInNoteToLibrary() {
   const saveButton = document.getElementById("lockin-save-note-btn");
   if (saveButton) saveButton.textContent = "Update Sticky Notes";
   saveState();
-  renderFloatingWidgets();
+  syncSessionNotePictureInPicture();
 }
 
-function toggleLockInTimerPin() {
+function supportsDocumentPictureInPicture() {
+  return "documentPictureInPicture" in window &&
+    typeof window.documentPictureInPicture?.requestWindow === "function";
+}
+
+function isSessionNotePictureInPictureOpen() {
+  return Boolean(sessionNotePictureInPictureWindow && !sessionNotePictureInPictureWindow.closed);
+}
+
+function updateSessionNotePictureInPictureButton() {
+  const button = document.getElementById("lockin-session-note-pip-btn");
+  const status = document.getElementById("lockin-session-note-pip-status");
+  if (button) {
+    button.textContent = isSessionNotePictureInPictureOpen()
+      ? "Close pop-out"
+      : "Open pop-out";
+  }
+  if (status) {
+    status.textContent = isSessionNotePictureInPictureOpen()
+      ? "Sticky note is open in its own browser window."
+      : "Open the note in its own browser window; always-on-top behavior depends on your browser and operating system.";
+  }
+}
+
+function preparePictureInPictureWindow(pipWindow, bodyClass, content) {
+  pipWindow.document.title = "Questify";
+  pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+  const stylesheet = pipWindow.document.createElement("link");
+  stylesheet.rel = "stylesheet";
+  stylesheet.href = new URL("style.css", window.location.href).href;
+  pipWindow.document.head.append(stylesheet);
+  pipWindow.document.body.classList.add(bodyClass);
+  pipWindow.document.body.innerHTML = content;
+}
+
+function closeSessionNotePictureInPicture() {
+  const pipWindow = sessionNotePictureInPictureWindow;
+  sessionNotePictureInPictureWindow = null;
+  if (pipWindow && !pipWindow.closed) pipWindow.close();
+  const popupWindow = sessionNotePopupWindow;
+  sessionNotePopupWindow = null;
+  if (popupWindow && !popupWindow.closed) popupWindow.close();
+  const noteWidget = getFloatingWidget("note");
+  if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
+    setFloatingWidget("note", null);
+  }
+  updateSessionNotePictureInPictureButton();
+}
+
+function syncSessionNotePictureInPicture() {
+  const pipWindow = sessionNotePictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed) return;
   const active = getActiveLockIn();
-  if (!active) return;
-  state.preferences.floatingLockInTimer = !state.preferences.floatingLockInTimer;
-  saveState();
-  renderFloatingWidgets();
-  const button = document.getElementById("lockin-pin-timer-btn");
-  if (button) button.textContent = state.preferences.floatingLockInTimer ? "Unpin timer" : "Pin timer";
-}
-
-function toggleLockInNotePin() {
-  if (!getActiveLockIn()) return;
-  state.preferences.floatingSessionNote = !state.preferences.floatingSessionNote;
-  if (state.preferences.floatingSessionNote) state.preferences.floatingNoteId = null;
-  saveState();
-  renderFloatingWidgets();
-  const button = document.getElementById("lockin-pin-note-btn");
-  if (button) button.textContent = state.preferences.floatingSessionNote ? "Unpin note" : "Pin note";
-}
-
-function renderFloatingWidgets() {
-  const host = document.getElementById("questify-floating-widgets");
-  if (!host) return;
-  if (["consent", "login"].includes(currentView) || !isOnboarded()) {
-    host.innerHTML = "";
+  if (!active) {
+    closeSessionNotePictureInPicture();
     return;
   }
-  const active = getActiveLockIn();
-  const timer = state.preferences.floatingLockInTimer && active
-    ? `<section class="floating-widget floating-widget--timer" data-floating-widget="timer" style="${getFloatingWidgetPositionStyle(state.preferences.floatingTimerPosition, 84)}" aria-label="Pinned Lock In timer">
-        <header class="floating-widget__header" data-floating-drag-handle>
-          <strong>🔒 ${escapeHTML(active.title)}</strong>
-          <button type="button" class="floating-widget__close" data-floating-unpin="timer" aria-label="Unpin timer">×</button>
-        </header>
-        <p class="floating-widget__timer" id="floating-lockin-timer">--:--</p>
-        <div class="floating-widget__actions">
-          <button type="button" class="btn-secondary btn-sm" data-floating-timer-action="pause">${active.isPaused ? "Resume" : "Pause"}</button>
-          <button type="button" class="btn-secondary btn-sm" data-floating-timer-action="focus">Focus</button>
-        </div>
-      </section>`
-    : "";
-  const note = getPinnedFloatingNote();
-  const noteWidget = note
-    ? `<section class="floating-widget floating-widget--note" data-floating-widget="note" style="--lockin-note-color:${note.color};--lockin-note-ink:${getLockInNoteInk(note.color)};${getFloatingWidgetPositionStyle(state.preferences.floatingNotePosition, 220)}" aria-label="Pinned sticky note">
-        <header class="floating-widget__header" data-floating-drag-handle>
-          <strong>${escapeHTML(note.title)}</strong>
-          <button type="button" class="floating-widget__close" data-floating-unpin="note" aria-label="Unpin note">×</button>
-        </header>
-        <textarea data-floating-note-content="${escapeAttribute(note.id)}" maxlength="${note.isSession ? 500 : 2000}" aria-label="Pinned note content" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
-        ${note.isSession ? `<button type="button" class="btn-secondary btn-sm" id="floating-save-session-note">Save to Sticky Notes</button>` : ""}
-      </section>`
-    : "";
-  host.innerHTML = `${timer}${noteWidget}`;
-  clampFloatingWidgetsToViewport();
-  updateFloatingTimerDisplay();
-  attachFloatingWidgetHandlers();
-}
-
-function getPinnedFloatingNote() {
-  const active = getActiveLockIn();
-  if (state.preferences.floatingSessionNote && active) {
-    return {
-      id: active.id,
-      title: active.title,
-      content: active.sessionNote || "",
-      color: /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
-        ? active.sessionNoteColor
-        : "#fff1a8",
-      isSession: true,
-    };
+  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
+    ? active.sessionNoteColor
+    : "#fff1a8";
+  const note = pipWindow.document.querySelector(".session-note-pip");
+  if (note) {
+    note.style.setProperty("--lockin-note-color", color);
+    note.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
   }
-  const saved = state.notes.find((note) => note.id === state.preferences.floatingNoteId);
-  return saved ? { ...saved, isSession: false } : null;
-}
-
-function getFloatingWidgetPositionStyle(position, fallbackTop) {
-  if (!position) return `right:12px;top:${fallbackTop}px`;
-  const widgetWidth = Math.min(280, Math.max(0, window.innerWidth - 20));
-  const x = Math.max(8, Math.min(window.innerWidth - widgetWidth - 8, position.x));
-  const y = Math.max(8, Math.min(window.innerHeight - 80, position.y));
-  return `left:${x}px;top:${y}px;right:auto`;
-}
-
-function clampFloatingWidgetsToViewport() {
-  let adjusted = false;
-  document.querySelectorAll("[data-floating-widget]").forEach((widget) => {
-    const positionKey = widget.dataset.floatingWidget === "timer"
-      ? "floatingTimerPosition"
-      : "floatingNotePosition";
-    const savedPosition = state.preferences[positionKey];
-    if (!savedPosition) return;
-    const rect = widget.getBoundingClientRect();
-    const x = Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left));
-    const y = Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top));
-    widget.style.left = `${x}px`;
-    widget.style.top = `${y}px`;
-    widget.style.right = "auto";
-    if (x !== savedPosition.x || y !== savedPosition.y) {
-      state.preferences[positionKey] = { x, y };
-      adjusted = true;
-    }
-  });
-  if (adjusted) saveState();
-}
-
-function updateFloatingTimerDisplay() {
-  const active = getActiveLockIn();
-  const timer = document.getElementById("floating-lockin-timer");
-  if (!active || !timer) return;
-  const elapsed = getLockInElapsedSeconds(active);
-  const remaining = Math.max(0, active.targetMinutes * 60 - elapsed);
-  timer.textContent = active.isPaused
-    ? `Paused · ${formatLockInClock(remaining)}`
-    : remaining > 0
-      ? `${formatLockInClock(remaining)} remaining`
-      : `${formatLockInClock(elapsed - active.targetMinutes * 60)} overtime`;
-  const pauseButton = document.querySelector('[data-floating-timer-action="pause"]');
-  if (pauseButton) pauseButton.textContent = active.isPaused ? "Resume" : "Pause";
-}
-
-function updateFloatingSessionNoteInput(value) {
-  const floatingInput = document.querySelector('[data-floating-note-content]');
-  if (floatingInput && document.activeElement !== floatingInput) floatingInput.value = value;
-}
-
-function updatePinnedNoteContent(noteId, rawValue) {
-  const active = getActiveLockIn();
-  if (state.preferences.floatingSessionNote && active?.id === noteId) {
-    active.sessionNote = rawValue.slice(0, 500);
-  } else {
-    const note = state.notes.find((item) => item.id === noteId);
-    if (!note) return false;
-    note.content = rawValue.slice(0, 2000);
-    note.updatedAt = new Date().toISOString();
-    const libraryInput = [...document.querySelectorAll("[data-note-content]")]
-      .find((element) => element.dataset.noteContent === noteId);
-    if (libraryInput && document.activeElement !== libraryInput) libraryInput.value = note.content;
+  pipWindow.document.body.style.setProperty("--lockin-note-color", color);
+  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+  const title = pipWindow.document.getElementById("session-note-pip-title");
+  if (title) title.textContent = active.title;
+  const input = pipWindow.document.getElementById("session-note-pip-content");
+  if (input && pipWindow.document.activeElement !== input) {
+    input.value = active.sessionNote || "";
   }
-  saveState();
-  const noteInput = document.getElementById("lockin-note-input");
-  if (noteInput && state.preferences.floatingSessionNote && document.activeElement !== noteInput) {
-    noteInput.value = active.sessionNote;
+}
+
+function toggleSessionNotePictureInPicture() {
+  const active = getActiveLockIn();
+  if (!active) return;
+  const noteUrl = new URL(window.location.href);
+  ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
+  noteUrl.searchParams.set("session-note", active.id);
+  noteUrl.hash = "";
+  sessionNotePopupWindow = window.open(
+    noteUrl.toString(),
+    `questify-lockin-note-${active.id}`,
+    "popup=yes,width=380,height=480,resizable=yes,scrollbars=yes"
+  );
+  if (!sessionNotePopupWindow) {
+    showToast("Allow pop-ups to open the Lock In note in its own window.");
+    return;
   }
-  return true;
+  sessionNotePopupWindow.focus();
 }
 
 function syncSessionNoteInput() {
   const active = getActiveLockIn();
   const input = document.getElementById("lockin-note-input");
   if (input && document.activeElement !== input) input.value = active?.sessionNote || "";
-}
-
-function attachFloatingWidgetHandlers() {
-  document.querySelectorAll("[data-floating-widget]").forEach((widget) => {
-    const handle = widget.querySelector("[data-floating-drag-handle]");
-    if (handle) {
-      handle.addEventListener("pointerdown", (event) => {
-        if (event.target.closest("button")) return;
-        const rect = widget.getBoundingClientRect();
-        const startX = event.clientX;
-        const startY = event.clientY;
-        const startLeft = rect.left;
-        const startTop = rect.top;
-        handle.setPointerCapture(event.pointerId);
-        const move = (moveEvent) => {
-          const x = Math.max(8, Math.min(window.innerWidth - widget.offsetWidth - 8, startLeft + moveEvent.clientX - startX));
-          const y = Math.max(8, Math.min(window.innerHeight - widget.offsetHeight - 8, startTop + moveEvent.clientY - startY));
-          widget.style.left = `${x}px`;
-          widget.style.top = `${y}px`;
-          widget.style.right = "auto";
-        };
-        const end = (endEvent) => {
-          if (handle.hasPointerCapture(endEvent.pointerId)) handle.releasePointerCapture(endEvent.pointerId);
-          handle.removeEventListener("pointermove", move);
-          handle.removeEventListener("pointerup", end);
-          handle.removeEventListener("pointercancel", end);
-          const positionKey = widget.dataset.floatingWidget === "timer"
-            ? "floatingTimerPosition"
-            : "floatingNotePosition";
-          state.preferences[positionKey] = {
-            x: parseFloat(widget.style.left) || 0,
-            y: parseFloat(widget.style.top) || 0,
-          };
-          saveState();
-        };
-        handle.addEventListener("pointermove", move);
-        handle.addEventListener("pointerup", end);
-        handle.addEventListener("pointercancel", end);
-      });
-    }
-
-    widget.querySelector("[data-floating-unpin]")?.addEventListener("click", () => {
-      if (widget.dataset.floatingWidget === "timer") {
-        state.preferences.floatingLockInTimer = false;
-      } else {
-        state.preferences.floatingSessionNote = false;
-        state.preferences.floatingNoteId = null;
-      }
-      saveState();
-      renderFloatingWidgets();
-    });
-  });
-
-  document.querySelectorAll('[data-floating-timer-action="pause"]').forEach((button) => {
-    button.addEventListener("click", () => {
-      const active = getActiveLockIn();
-      if (!active) return;
-      active.isPaused ? resumeLockIn(active.id) : pauseLockIn(active.id);
-      updateLockInTimerDisplay();
-      updateFloatingTimerDisplay();
-    });
-  });
-  document.querySelectorAll('[data-floating-timer-action="focus"]').forEach((button) => {
-    button.addEventListener("click", openLockInFocusWindow);
-  });
-
-  document.querySelectorAll("[data-floating-note-content]").forEach((input) => {
-    input.addEventListener("input", () => {
-      updatePinnedNoteContent(input.dataset.floatingNoteContent, input.value);
-    });
-  });
-  document.getElementById("floating-save-session-note")?.addEventListener("click", saveLockInNoteToLibrary);
 }
 
 function openLockInFocusWindow() {
@@ -4470,9 +4500,7 @@ function openLockInFocusWindow() {
 }
 
 function renderLockInFocusWindow() {
-  const supportsPictureInPicture = "documentPictureInPicture" in window &&
-    typeof window.documentPictureInPicture?.requestWindow === "function";
-  const hasActiveSession = Boolean(getActiveLockIn());
+  const active = getActiveLockIn();
   return `
     <section class="lockin-focus-window" aria-labelledby="lockin-focus-window-title">
       <header class="lockin-focus-window__header">
@@ -4484,15 +4512,19 @@ function renderLockInFocusWindow() {
       </header>
       ${renderLockInPanel()}
       <div class="lockin-focus-window__pip">
-        ${supportsPictureInPicture && hasActiveSession
-          ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary">Keep on top</button>
-             <p id="lockin-picture-in-picture-status" class="text-muted">Optional floating timer; availability depends on your browser.</p>`
-          : supportsPictureInPicture
-          ? `<p class="text-muted">Start a focus session to enable the floating timer.</p>`
-          : `<p class="text-muted">This browser cannot keep a web window above other apps. The Lock In timer remains open here.</p>`}
+        <p class="text-muted">The timer stays here when you open its separate pop-out window.</p>
       </div>
     </section>
   `;
+}
+
+function updateLockInPictureInPictureButton() {
+  const button = document.getElementById("lockin-picture-in-picture-btn");
+  if (button) {
+    button.textContent = lockInTimerPopupWindow && !lockInTimerPopupWindow.closed
+      ? "Show timer pop-out ↗"
+      : "Pin timer pop-out ↗";
+  }
 }
 
 function updateLockInPictureInPicture(active, elapsedSec) {
@@ -4500,7 +4532,6 @@ function updateLockInPictureInPicture(active, elapsedSec) {
   const title = lockInPictureInPictureWindow.document.getElementById("lockin-pip-title");
   const timer = lockInPictureInPictureWindow.document.getElementById("lockin-pip-timer");
   const progress = lockInPictureInPictureWindow.document.getElementById("lockin-pip-progress");
-  const note = lockInPictureInPictureWindow.document.getElementById("lockin-pip-note");
   if (title) title.textContent = active.title;
   if (timer) {
     const remaining = Math.max(0, active.targetMinutes * 60 - elapsedSec);
@@ -4511,63 +4542,64 @@ function updateLockInPictureInPicture(active, elapsedSec) {
       : `${formatLockInClock(elapsedSec - active.targetMinutes * 60)} overtime`;
   }
   if (progress) progress.style.width = `${Math.min(100, (elapsedSec / (active.targetMinutes * 60)) * 100)}%`;
-  if (note) note.textContent = active.sessionNote || "Your focus note will appear here.";
+  const pauseButton = lockInPictureInPictureWindow.document.querySelector("[data-pip-pause]");
+  if (pauseButton) pauseButton.textContent = active.isPaused ? "Resume" : "Pause";
 }
 
 function closeLockInPictureInPicture() {
   if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
   lockInPictureInPictureInterval = null;
-  lockInPictureInPictureWindow?.close();
+  const pipWindow = lockInPictureInPictureWindow;
   lockInPictureInPictureWindow = null;
+  if (pipWindow && !pipWindow.closed) pipWindow.close();
+  const popupWindow = lockInTimerPopupWindow;
+  lockInTimerPopupWindow = null;
+  if (popupWindow && !popupWindow.closed) popupWindow.close();
+  if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
+  updateLockInPictureInPictureButton();
 }
 
-async function openLockInPictureInPicture() {
-  const status = document.getElementById("lockin-picture-in-picture-status");
-  try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 320, height: 190 });
-    lockInPictureInPictureWindow = pipWindow;
-    pipWindow.document.title = "Questify Lock In";
-    pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
-    const stylesheet = pipWindow.document.createElement("link");
-    stylesheet.rel = "stylesheet";
-    stylesheet.href = new URL("style.css", window.location.href).href;
-    pipWindow.document.head.append(stylesheet);
-    pipWindow.document.body.classList.add("lockin-pip-host");
-    pipWindow.document.body.innerHTML = `
-      <main class="lockin-pip">
-        <p class="dashboard-section__eyebrow">QUESTIFY LOCK IN</p>
-        <strong id="lockin-pip-title"></strong>
-        <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
-        <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
-        <p id="lockin-pip-note" class="lockin-pip__note"></p>
-      </main>
-    `;
-    pipWindow.addEventListener("pagehide", () => {
-      lockInPictureInPictureWindow = null;
-      if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
-      lockInPictureInPictureInterval = null;
-    }, { once: true });
-    if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
-    lockInPictureInPictureInterval = setInterval(() => {
-      const active = getActiveLockIn();
-      if (!active) {
-        pipWindow.close();
-        return;
-      }
-      updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
-    }, 1000);
-    const active = getActiveLockIn();
-    if (active) updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
-    if (status) status.textContent = "Floating timer is open; close it in the PiP window.";
-  } catch (error) {
-    console.error("Could not open Lock In Picture-in-Picture:", error);
-    if (status) status.textContent = "Picture-in-Picture could not open. Keep using this focus window.";
-    const button = document.getElementById("lockin-picture-in-picture-btn");
-    if (button) {
-      button.disabled = true;
-      button.title = "Floating mode could not open in this browser window.";
-    }
+function openLockInPictureInPicture() {
+  const timerUrl = new URL(window.location.href);
+  ["focus", "note", "session-note"].forEach((key) => timerUrl.searchParams.delete(key));
+  timerUrl.searchParams.set("timer", "lockin");
+  timerUrl.hash = "";
+  lockInTimerPopupWindow = window.open(
+    timerUrl.toString(),
+    "questify-lockin-timer",
+    "popup=yes,width=360,height=440,resizable=yes,scrollbars=no"
+  );
+  if (!lockInTimerPopupWindow) {
+    showToast("Allow pop-ups to pin the Lock In timer in its own window.");
+    return;
   }
+  lockInTimerPopupWindow.focus();
+  updateLockInPictureInPictureButton();
+}
+
+function renderLockInTimerPopup() {
+  const active = getActiveLockIn();
+  if (!active) {
+    return `<section class="lockin-timer-window"><p class="dashboard-section__eyebrow">QUESTIFY FOCUS</p><h1>No active Lock In</h1><p class="text-muted">Start a focus session in Questify to use its timer pop-out.</p><button type="button" class="btn-secondary" data-timer-window-close>Close window</button></section>`;
+  }
+  const elapsedSec = getLockInElapsedSeconds(active);
+  return `
+    <section class="lockin-timer-window" aria-label="Lock In timer pop-out">
+      <header class="lockin-timer-window__header">
+        <span class="lockin-pip__mark" aria-hidden="true">Q</span>
+        <div><p class="dashboard-section__eyebrow">QUESTIFY FOCUS</p><strong>${escapeHTML(active.title)}</strong></div>
+        <button type="button" class="btn-secondary btn-sm" data-timer-window-close aria-label="Close timer window">×</button>
+      </header>
+      <div class="lockin-timer-window__readout" id="lockin-timer">${formatLockInClock(Math.max(0, active.targetMinutes * 60 - elapsedSec))}</div>
+      <p id="lockin-status" class="lockin-status">${active.isPaused ? "Paused" : "Locked in..."}</p>
+      <div class="lockin-timer-window__track"><span id="lockin-progress-fill" style="width:${Math.min(100, (elapsedSec / (active.targetMinutes * 60)) * 100)}%"></span></div>
+      <div class="lockin-timer-window__actions">
+        <button type="button" class="btn-secondary btn-sm" id="lockin-pause-btn" data-id="${escapeAttribute(active.id)}">${active.isPaused ? "Resume" : "Pause"}</button>
+        <button type="button" class="btn-secondary btn-sm" id="lockin-add-time-btn" data-id="${escapeAttribute(active.id)}">+10 min</button>
+      </div>
+      <p class="text-muted">This window controls the same timer shown in your Lock In view.</p>
+    </section>
+  `;
 }
 
 function renderLockInPanel() {
@@ -4580,8 +4612,12 @@ function renderLockInPanel() {
           <span class="lockin-panel__badge">🔒 Lock In</span>
           <div class="lockin-panel__header-tools">
             <span id="lockin-status" class="lockin-status">Locked in...</span>
-            <button type="button" class="btn-secondary btn-sm" id="lockin-pin-timer-btn">${state.preferences.floatingLockInTimer ? "Unpin timer" : "Pin timer"}</button>
-            <button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>
+            ${!isLockInTimerWindow
+              ? `<button type="button" class="btn-secondary btn-sm" id="lockin-picture-in-picture-btn">Pin timer pop-out ↗</button>`
+              : ""}
+            ${!isLockInFocusWindow && !isLockInTimerWindow
+              ? `<button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>`
+              : ""}
           </div>
         </div>
         <h3 class="lockin-panel__title">${escapeHTML(active.title)}</h3>
@@ -4958,7 +4994,7 @@ function renderStickyNotesPage() {
         <div>
           <p class="dashboard-section__eyebrow">YOUR THOUGHTS, IN ONE PLACE</p>
           <h1 id="sticky-notes-title">Sticky Notes</h1>
-          <p class="text-muted">Capture quick ideas, color-code them, open a note in its own window, or pin it over any Questify page.</p>
+          <p class="text-muted">Capture ideas, then open a note in its own window to float it above other apps where your browser supports it.</p>
         </div>
         <button type="button" class="btn" id="create-sticky-note">＋ New note</button>
       </header>
@@ -4988,7 +5024,6 @@ function renderStickyNotePopup() {
     `;
   }
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
-  const isPinned = state.preferences.floatingNoteId === note.id;
   return `
     <section class="sticky-note-window" aria-label="Sticky note window">
       <header class="sticky-note-window__brand">
@@ -4996,9 +5031,9 @@ function renderStickyNotePopup() {
         <div><p class="dashboard-section__eyebrow">QUESTIFY STICKY NOTE</p><h1>Quick thought space</h1></div>
         <button type="button" class="btn-secondary btn-sm" data-note-window-close>Close</button>
       </header>
-      <article class="sticky-note-card sticky-note-card--window ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+      <article class="sticky-note-card sticky-note-card--window" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
         <div class="sticky-note-card__header">
-          <span class="sticky-note-card__pin-indicator">${isPinned ? "Pinned on Questify" : "Sticky note"}</span>
+          <span class="sticky-note-card__pin-indicator">Sticky note</span>
           <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
         </div>
         <label class="sr-only" for="note-window-title">Note title</label>
@@ -5012,7 +5047,6 @@ function renderStickyNotePopup() {
           <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
         </div>
         <div class="sticky-note-card__actions">
-          <button type="button" class="btn-secondary btn-sm" data-note-pin="${escapeAttribute(note.id)}" aria-pressed="${isPinned}">${isPinned ? "Unpin from Questify" : "Pin on Questify"}</button>
           <span class="sticky-note-window__sync" role="status">Edits save automatically and sync with Questify.</span>
         </div>
       </article>
@@ -5027,7 +5061,7 @@ function openStickyNoteWindow(noteId) {
     return;
   }
   const noteUrl = new URL(window.location.href);
-  noteUrl.searchParams.delete("focus");
+  ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
   noteUrl.searchParams.set("note", noteId);
   noteUrl.hash = "";
   const noteWindow = window.open(
@@ -5042,12 +5076,149 @@ function openStickyNoteWindow(noteId) {
   noteWindow.focus();
 }
 
-function toggleStickyNotePin(noteId) {
-  if (!state.notes.some((note) => note.id === noteId)) return;
-  state.preferences.floatingNoteId = state.preferences.floatingNoteId === noteId ? null : noteId;
-  state.preferences.floatingSessionNote = false;
-  saveState();
-  renderView();
+function isSavedNotePictureInPictureOpen() {
+  return Boolean(savedNotePictureInPictureWindow && !savedNotePictureInPictureWindow.closed);
+}
+
+function updateSavedNotePictureInPictureButton() {
+  const button = document.getElementById("saved-note-pip-btn");
+  const status = document.getElementById("saved-note-pip-status");
+  if (button) {
+    button.textContent = isSavedNotePictureInPictureOpen()
+      ? "Close pop-out"
+      : "Open pop-out";
+  }
+  if (status) {
+    status.textContent = isSavedNotePictureInPictureOpen()
+      ? "Sticky note is open in its own browser window."
+      : "Open this note in its own browser window; always-on-top behavior depends on your browser and operating system.";
+  }
+}
+
+function closeSavedNotePictureInPicture() {
+  const pipWindow = savedNotePictureInPictureWindow;
+  savedNotePictureInPictureWindow = null;
+  if (pipWindow && !pipWindow.closed) pipWindow.close();
+  const noteWidget = getFloatingWidget("note");
+  if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
+    setFloatingWidget("note", null);
+  }
+  updateSavedNotePictureInPictureButton();
+}
+
+function syncSavedNotePictureInPicture() {
+  if (!isStickyNoteWindow) return;
+  const pipWindow = savedNotePictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed) return;
+  const note = state.notes.find((item) => item.id === stickyNoteWindowId);
+  if (!note) {
+    closeSavedNotePictureInPicture();
+    return;
+  }
+  const card = pipWindow.document.querySelector(".note-pip");
+  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  if (card) {
+    card.style.setProperty("--lockin-note-color", color);
+    card.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  }
+  pipWindow.document.body.style.setProperty("--lockin-note-color", color);
+  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+  const title = pipWindow.document.getElementById("saved-note-pip-title");
+  if (title && pipWindow.document.activeElement !== title) title.value = note.title;
+  const content = pipWindow.document.getElementById("saved-note-pip-content");
+  if (content && pipWindow.document.activeElement !== content) content.value = note.content;
+  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+    const selected = button.dataset.pipNoteColor === color;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  const updated = pipWindow.document.getElementById("saved-note-pip-updated");
+  if (updated) updated.textContent = formatRelativeTime(note.updatedAt);
+}
+
+function syncStickyNotePopupEditor(note) {
+  if (!isStickyNoteWindow || note.id !== stickyNoteWindowId) return;
+  const title = [...document.querySelectorAll("[data-note-title]")]
+    .find((input) => input.dataset.noteTitle === note.id);
+  const content = [...document.querySelectorAll("[data-note-content]")]
+    .find((input) => input.dataset.noteContent === note.id);
+  if (title && document.activeElement !== title) title.value = note.title;
+  if (content && document.activeElement !== content) content.value = note.content;
+  const card = [...document.querySelectorAll("[data-note-card]")]
+    .find((element) => element.dataset.noteCard === note.id);
+  const updated = card?.querySelector(".sticky-note-card__updated");
+  if (updated) updated.textContent = formatRelativeTime(note.updatedAt);
+  document.title = `${note.title || "Sticky Note"} — Questify`;
+}
+
+async function toggleSavedNotePictureInPicture() {
+  if (isSavedNotePictureInPictureOpen()) {
+    closeSavedNotePictureInPicture();
+    return;
+  }
+  const note = state.notes.find((item) => item.id === stickyNoteWindowId);
+  if (!note || !supportsDocumentPictureInPicture()) return;
+  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  try {
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 340, height: 390 });
+    savedNotePictureInPictureWindow = pipWindow;
+    pipWindow.document.title = "Questify Sticky Note";
+    preparePictureInPictureWindow(
+      pipWindow,
+      "note-pip-host",
+      `<main class="note-pip saved-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+        <header><label for="saved-note-pip-title">Sticky note</label><button type="button" class="btn-secondary btn-sm note-pip__close" data-pip-close aria-label="Close floating note">×</button></header>
+        <input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title">
+        <label class="sr-only" for="saved-note-pip-content">Note content</label>
+        <textarea id="saved-note-pip-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+        </div>
+        <p id="saved-note-pip-updated">${escapeHTML(formatRelativeTime(note.updatedAt))} · saves automatically</p>
+      </main>`
+    );
+    const titleInput = pipWindow.document.getElementById("saved-note-pip-title");
+    const contentInput = pipWindow.document.getElementById("saved-note-pip-content");
+    const updateNote = () => {
+      const current = state.notes.find((item) => item.id === stickyNoteWindowId);
+      if (!current) {
+        closeSavedNotePictureInPicture();
+        return;
+      }
+      current.title = (titleInput?.value || "").slice(0, 80);
+      current.content = (contentInput?.value || "").slice(0, 2000);
+      current.updatedAt = new Date().toISOString();
+      saveState();
+      syncStickyNotePopupEditor(current);
+      syncSavedNotePictureInPicture();
+    };
+    titleInput?.addEventListener("input", updateNote);
+    contentInput?.addEventListener("input", updateNote);
+    pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+      button.addEventListener("click", () => updateStickyNoteColor(stickyNoteWindowId, button.dataset.pipNoteColor));
+    });
+    pipWindow.document.querySelector("[data-pip-close]")?.addEventListener("click", closeSavedNotePictureInPicture);
+    pipWindow.addEventListener("pagehide", () => {
+      if (savedNotePictureInPictureWindow === pipWindow) {
+        savedNotePictureInPictureWindow = null;
+        const noteWidget = getFloatingWidget("note");
+        if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
+          setFloatingWidget("note", null);
+        }
+        updateSavedNotePictureInPictureButton();
+      }
+    }, { once: true });
+    setFloatingWidget("note", { mode: "pip", kind: "saved", id: note.id });
+    updateSavedNotePictureInPictureButton();
+  } catch (error) {
+    console.error("Could not open the saved note Picture-in-Picture window:", error);
+    const status = document.getElementById("saved-note-pip-status");
+    if (status) status.textContent = "The floating note could not open. Your browser may limit simultaneous PiP windows.";
+    showToast("The floating note could not open. Check browser Picture-in-Picture support.");
+  }
 }
 
 function attachStickyNotePopupHandlers() {
@@ -5057,9 +5228,6 @@ function attachStickyNotePopupHandlers() {
   });
   document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
     input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
-  });
-  document.querySelectorAll("[data-note-pin]").forEach((button) => {
-    button.addEventListener("click", () => toggleStickyNotePin(button.dataset.notePin));
   });
   document.querySelectorAll("[data-note-window-close]").forEach((button) => {
     button.addEventListener("click", closeStickyNoteWindow);
@@ -5079,8 +5247,12 @@ function closeStickyNoteWindow() {
 
 function renderStickyNoteCard(note) {
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
-  const isPinned = state.preferences.floatingNoteId === note.id;
   const confirmingDelete = confirmingNoteDeleteId === note.id;
+  const pinnedNote = getFloatingWidget("note");
+  const isPinned = pinnedNote?.mode === "app" &&
+    pinnedNote.kind === "saved" &&
+    pinnedNote.id === note.id &&
+    pinnedNote.ownerId === appWindowId;
   return `
     <article class="sticky-note-card ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
       <div class="sticky-note-card__header">
@@ -5098,7 +5270,7 @@ function renderStickyNoteCard(note) {
         <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
       </div>
       <div class="sticky-note-card__actions">
-        <button type="button" class="btn-secondary btn-sm" data-note-pin="${escapeAttribute(note.id)}">${isPinned ? "Unpin" : "Pin on screen"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinned ? "Unpin" : "Pin on screen"}</button>
         <button type="button" class="btn-secondary btn-sm" data-note-open-window="${escapeAttribute(note.id)}">Open in window ↗</button>
         ${confirmingDelete
           ? `<span class="sticky-note-card__confirm">Delete this note?</span>
@@ -5139,13 +5311,22 @@ function attachStickyNotesHandlers() {
   document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
     input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
   });
-  document.querySelectorAll("[data-note-pin]").forEach((button) => {
-    button.addEventListener("click", () => {
-      toggleStickyNotePin(button.dataset.notePin);
-    });
-  });
   document.querySelectorAll("[data-note-open-window]").forEach((button) => {
     button.addEventListener("click", () => openStickyNoteWindow(button.dataset.noteOpenWindow));
+  });
+  document.querySelectorAll("[data-note-pin-app]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const pinnedNote = getFloatingWidget("note");
+      if (pinnedNote?.mode === "app" &&
+          pinnedNote.kind === "saved" &&
+          pinnedNote.id === button.dataset.notePinApp &&
+          pinnedNote.ownerId === appWindowId) {
+        setFloatingWidget("note", null);
+      } else {
+        setFloatingWidget("note", { mode: "app", kind: "saved", id: button.dataset.notePinApp });
+      }
+      renderView();
+    });
   });
   document.querySelectorAll("[data-note-delete]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5157,7 +5338,7 @@ function attachStickyNotesHandlers() {
     button.addEventListener("click", () => {
       const id = button.dataset.noteDeleteConfirm;
       state.notes = state.notes.filter((note) => note.id !== id);
-      if (state.preferences.floatingNoteId === id) state.preferences.floatingNoteId = null;
+      if (getFloatingWidget("note")?.id === id) setFloatingWidget("note", null);
       confirmingNoteDeleteId = null;
       saveState();
       renderView();
@@ -5183,11 +5364,10 @@ function attachStickyNoteEditorHandlers() {
       const card = input.closest("[data-note-card]");
       const updatedLabel = card?.querySelector(".sticky-note-card__updated");
       if (updatedLabel) updatedLabel.textContent = "just now";
-      if (isStickyNoteWindow && input.hasAttribute("data-note-title")) {
-        document.title = `${note.title || "Sticky Note"} — Questify`;
-      }
       saveState();
-      updateFloatingSavedNote(note);
+      syncAppFloatingWidgetNote();
+      syncStickyNotePopupEditor(note);
+      syncSavedNotePictureInPicture();
     });
   });
 }
@@ -5212,20 +5392,7 @@ function updateStickyNoteColor(id, color) {
     const colorInput = card.querySelector("[data-note-custom-color]");
     if (colorInput) colorInput.value = color;
   }
-  const floating = document.querySelector(".floating-widget--note");
-  if (floating && state.preferences.floatingNoteId === id) {
-    floating.style.setProperty("--lockin-note-color", color);
-    floating.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
-  }
-}
-
-function updateFloatingSavedNote(note) {
-  const floating = document.querySelector(".floating-widget--note");
-  if (!floating || state.preferences.floatingNoteId !== note.id) return;
-  const title = floating.querySelector(".floating-widget__header strong");
-  const textarea = floating.querySelector("[data-floating-note-content]");
-  if (title && document.activeElement !== title) title.textContent = note.title || "Untitled note";
-  if (textarea && document.activeElement !== textarea) textarea.value = note.content;
+  syncSavedNotePictureInPicture();
 }
 
 // -------------------------------------
@@ -5624,7 +5791,7 @@ const views = {
 
     return `
       <h2>Badges</h2>
-      <p class="text-muted">Unlock badges by completing challenges and building streaks.</p>
+      <p class="text-muted">Earn badges across habits, challenges, Lock In, streaks, XP, and the rest of Questify.</p>
       <p class="badge-progress-summary">${unlockedCount} / ${BADGES.length} unlocked</p>
 
       <h3 class="dashboard-section-title" style="margin-top: var(--space-lg);">
@@ -5736,10 +5903,11 @@ const views = {
       <div class="settings-row">
         <div>
           <div>Update Questify</div>
-          <div class="text-muted">Download the latest version of the app when you're online.</div>
+          <div class="text-muted">Check for a newer deployment. Questify will ask before installing it.</div>
         </div>
-        <button id="update-app-btn" class="btn btn-sm" type="button">Update app</button>
+        <button id="update-app-btn" class="btn btn-sm" type="button">Check for updates</button>
       </div>
+      <p id="update-app-status" class="settings-update-status text-muted" role="status" aria-live="polite">Check for updates to see whether you have the latest version.</p>
     </div>
 
     <section class="settings-section card navigation-preferences" aria-labelledby="navigation-preferences-title">
@@ -6304,6 +6472,33 @@ function attachChallengesHandlers() {
     button.addEventListener("click", openLockInFocusWindow);
   });
 
+  document.getElementById("lockin-timer-app-toggle")?.addEventListener("click", () => {
+    const timerWidget = getFloatingWidget("timer");
+    if (timerWidget?.mode === "app" && timerWidget.ownerId === appWindowId) {
+      setFloatingWidget("timer", null);
+    } else {
+      if (lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed) {
+        closeLockInPictureInPicture();
+      }
+      setFloatingWidget("timer", { mode: "app", kind: "lockin", id: getActiveLockIn()?.id });
+    }
+    renderView();
+  });
+
+  document.getElementById("lockin-session-note-app-btn")?.addEventListener("click", () => {
+    const noteWidget = getFloatingWidget("note");
+    if (noteWidget?.mode === "app" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
+      setFloatingWidget("note", null);
+    } else {
+      if (sessionNotePictureInPictureWindow && !sessionNotePictureInPictureWindow.closed) {
+        closeSessionNotePictureInPicture();
+      }
+      const active = getActiveLockIn();
+      if (active) setFloatingWidget("note", { mode: "app", kind: "session", id: active.id });
+    }
+    renderView();
+  });
+
   const lockInNoteInput = document.getElementById("lockin-note-input");
   if (lockInNoteInput) {
     lockInNoteInput.addEventListener("input", () => {
@@ -6315,11 +6510,10 @@ function attachChallengesHandlers() {
         ? "Session changes not saved to Sticky Notes"
         : "Session only";
       saveState();
-      updateFloatingSessionNoteInput(lockInNoteInput.value);
+      syncSessionNotePictureInPicture();
     });
   }
-  document.getElementById("lockin-pin-timer-btn")?.addEventListener("click", toggleLockInTimerPin);
-  document.getElementById("lockin-pin-note-btn")?.addEventListener("click", toggleLockInNotePin);
+  document.getElementById("lockin-session-note-pip-btn")?.addEventListener("click", toggleSessionNotePictureInPicture);
   document.getElementById("lockin-save-note-btn")?.addEventListener("click", saveLockInNoteToLibrary);
   document.querySelectorAll("[data-lockin-note-color]").forEach((button) => {
     button.addEventListener("click", () => updateLockInNoteColor(button.dataset.lockinNoteColor));
@@ -6339,6 +6533,9 @@ function attachChallengesHandlers() {
     window.location.replace(appUrl.toString());
   });
   document.getElementById("lockin-picture-in-picture-btn")?.addEventListener("click", openLockInPictureInPicture);
+  document.querySelectorAll("[data-timer-window-close], [data-session-note-window-close]").forEach((button) => {
+    button.addEventListener("click", () => window.close());
+  });
 
   const quietFocusSwitch = document.getElementById("lockin-notifications-switch");
   if (quietFocusSwitch) {
@@ -6580,43 +6777,140 @@ function attachProfileHandlers() {
   }
 }
 
-async function prepareAppUpdate(requireServiceWorker = true) {
-  if (!navigator.onLine) throw new Error("An internet connection is required to update Questify.");
-  if (!("serviceWorker" in navigator)) {
-    if (requireServiceWorker) throw new Error("Service workers are not supported in this browser.");
+function setAppUpdateStatus(message) {
+  const status = document.getElementById("update-app-status");
+  if (status) status.textContent = message;
+}
+
+function closeAppUpdatePrompt() {
+  if (!appUpdatePrompt) return;
+  if (appUpdatePrompt.open) appUpdatePrompt.close();
+  appUpdatePrompt.remove();
+  appUpdatePrompt = null;
+}
+
+function activateAppUpdate(registration, button) {
+  const waitingWorker = registration.waiting;
+  if (!waitingWorker) {
+    closeAppUpdatePrompt();
+    setAppUpdateStatus("The update is no longer waiting. Check again to see the current version.");
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Check for updates";
+    }
     return;
   }
 
-  const registration = await navigator.serviceWorker.getRegistration();
-  if (!registration) {
-    if (requireServiceWorker) throw new Error("No installed Questify app was found to update.");
-    return;
+  shouldReloadForAppUpdate = true;
+  setAppUpdateStatus("Installing update… Questify will reload when it is ready.");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Updating…";
   }
+  closeAppUpdatePrompt();
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (appUpdateActivationTimeoutId) clearTimeout(appUpdateActivationTimeoutId);
+    appUpdateActivationTimeoutId = null;
+    if (shouldReloadForAppUpdate) window.location.reload();
+  }, { once: true });
+  waitingWorker.postMessage({ type: "SKIP_WAITING" });
+  appUpdateActivationTimeoutId = setTimeout(() => {
+    shouldReloadForAppUpdate = false;
+    appUpdateActivationTimeoutId = null;
+    setAppUpdateStatus("The update did not finish activating. You can keep using this version and try again.");
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Check for updates";
+    }
+  }, 30000);
+}
 
-  await registration.update();
-  if ("caches" in window) {
-    const cacheNames = await caches.keys();
-    await Promise.all(
-      cacheNames
-        .filter((name) => name.startsWith("questify-cache-"))
-        .map((name) => caches.delete(name))
-    );
-  }
+function showAppUpdatePrompt(registration, button) {
+  closeAppUpdatePrompt();
+  appUpdatePrompt = document.createElement("dialog");
+  appUpdatePrompt.className = "app-update-dialog";
+  appUpdatePrompt.setAttribute("aria-labelledby", "app-update-dialog-title");
+  appUpdatePrompt.innerHTML = `
+    <div class="app-update-dialog__icon" aria-hidden="true">↻</div>
+    <p class="dashboard-section__eyebrow">A FRESH QUESTIFY IS READY</p>
+    <h2 id="app-update-dialog-title">Update available</h2>
+    <p>A newer deployment is ready. Update now to load it, or keep using this version and update later from Settings.</p>
+    <div class="app-update-dialog__actions">
+      <button type="button" class="btn-secondary" data-update-keep>Keep using this version</button>
+      <button type="button" class="btn" data-update-accept>Update now</button>
+    </div>
+  `;
+  document.body.append(appUpdatePrompt);
+  appUpdatePrompt.querySelector("[data-update-keep]")?.addEventListener("click", () => {
+    closeAppUpdatePrompt();
+    setAppUpdateStatus("Update available. You can keep using this version and update later from Settings.");
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Check for updates";
+    }
+  });
+  appUpdatePrompt.querySelector("[data-update-accept]")?.addEventListener("click", () => {
+    activateAppUpdate(registration, button);
+  });
+  appUpdatePrompt.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    appUpdatePrompt.querySelector("[data-update-keep]")?.click();
+  });
+  appUpdatePrompt.showModal();
+  appUpdatePrompt.querySelector("[data-update-accept]")?.focus();
+}
+
+function waitForServiceWorkerInstall(worker) {
+  if (["installed", "activated", "redundant"].includes(worker.state)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      worker.removeEventListener("statechange", handleStateChange);
+      reject(new Error("Questify's update is taking longer than expected. Please try again."));
+    }, 30000);
+    const handleStateChange = () => {
+      if (!["installed", "activated", "redundant"].includes(worker.state)) return;
+      clearTimeout(timeoutId);
+      worker.removeEventListener("statechange", handleStateChange);
+      resolve();
+    };
+    worker.addEventListener("statechange", handleStateChange);
+  });
 }
 
 async function updateApp(button) {
-  const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "Checking…";
+  setAppUpdateStatus("Checking for a newer Questify deployment…");
 
   try {
-    await prepareAppUpdate();
-    window.location.reload();
-  } catch (error) {
-    console.error("Failed to update Questify:", error);
+    if (!navigator.onLine) throw new Error("An internet connection is required to check for updates.");
+    if (!("serviceWorker" in navigator)) throw new Error("Service workers are not supported in this browser.");
+
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) throw new Error("Questify is not installed as a service worker on this browser.");
+
+    if (!registration.waiting) {
+      await registration.update();
+      const installing = registration.installing;
+      if (installing) await waitForServiceWorkerInstall(installing);
+    }
+
+    if (registration.waiting) {
+      setAppUpdateStatus("A newer version is ready for you to review.");
+      showAppUpdatePrompt(registration, button);
+      return;
+    }
+
+    setAppUpdateStatus("You're up to date. No newer Questify deployment is available.");
     button.disabled = false;
-    button.textContent = originalLabel;
-    showToast(`⚠️ ${escapeHTML(error.message || "Questify couldn't check for updates.")}`);
+    button.textContent = "Check for updates";
+  } catch (error) {
+    console.error("Failed to check for Questify updates:", error);
+    const message = error instanceof Error ? error.message : "Questify couldn't check for updates.";
+    setAppUpdateStatus(message);
+    button.disabled = false;
+    button.textContent = "Try again";
+    showToast(`⚠️ ${escapeHTML(message)}`);
   }
 }
 
@@ -6678,7 +6972,15 @@ function initPullToRefresh() {
     indicator.setAttribute("aria-hidden", "false");
 
     try {
-      if (navigator.onLine) await prepareAppUpdate(false);
+      if (navigator.onLine && "serviceWorker" in navigator) {
+        const registration = await navigator.serviceWorker.getRegistration();
+        if (registration) {
+          await registration.update();
+          if (registration.waiting) {
+            showToast("A Questify update is ready. Review it in Settings when you’re ready.");
+          }
+        }
+      }
       window.location.reload();
     } catch (error) {
       console.error("Failed to refresh Questify:", error);
@@ -6936,6 +7238,261 @@ function attachConsentHandler() {
   });
 }
 
+function renderAppFloatingWidgets() {
+  if (isLockInFocusWindow || isStickyNoteWindow) return "";
+  const active = getActiveLockIn();
+  const timerWidget = getFloatingWidget("timer");
+  const noteWidget = getFloatingWidget("note");
+  const timerHTML = timerWidget?.mode === "app" &&
+      timerWidget.ownerId === appWindowId && active && timerWidget.id === active.id
+    ? `
+      <aside class="app-floating-widget app-floating-timer card" style="${getFloatingWidgetPositionStyle(timerWidget)}" aria-label="Pinned Lock In timer">
+        <div class="app-floating-widget__header" data-floating-widget-drag-handle="timer">
+          <span class="dashboard-section__eyebrow">QUESTIFY FOCUS</span>
+          <button type="button" class="app-floating-widget__close" data-floating-widget-close="timer" aria-label="Unpin timer">×</button>
+        </div>
+        <strong class="app-floating-timer__title">${escapeHTML(active.title)}</strong>
+        <span id="floating-lockin-timer-value" class="app-floating-timer__time"></span>
+        <div class="app-floating-timer__actions">
+          <button type="button" class="btn-secondary btn-sm" data-floating-timer-pause>${active.isPaused ? "Resume" : "Pause"}</button>
+          <button type="button" class="btn-secondary btn-sm" data-floating-timer-add-time>+10 min</button>
+        </div>
+      </aside>
+    `
+    : "";
+  let noteHTML = "";
+
+  if (noteWidget?.mode === "app" && noteWidget.ownerId === appWindowId) {
+    if (noteWidget.kind === "session" && active?.id === noteWidget.id) {
+      const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
+        ? active.sessionNoteColor
+        : "#fff1a8";
+      noteHTML = `
+        <aside class="app-floating-widget app-floating-note card" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)};${getFloatingWidgetPositionStyle(noteWidget)}" aria-label="Pinned Lock In note">
+          <div class="app-floating-widget__header" data-floating-widget-drag-handle="note">
+            <label for="floating-session-note-content">SESSION NOTE</label>
+            <button type="button" class="app-floating-widget__close" data-floating-widget-close="note" aria-label="Unpin note">×</button>
+          </div>
+          <textarea id="floating-session-note-content" maxlength="500" placeholder="Keep your next thought here…">${escapeHTML(active.sessionNote || "")}</textarea>
+          <span class="app-floating-widget__caption">Session only · saved automatically</span>
+        </aside>
+      `;
+    } else if (noteWidget.kind === "saved") {
+      const note = state.notes.find((item) => item.id === noteWidget.id);
+      if (note) {
+        const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+        noteHTML = `
+          <aside class="app-floating-widget app-floating-note card" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)};${getFloatingWidgetPositionStyle(noteWidget)}" aria-label="Pinned sticky note">
+              <div class="app-floating-widget__header" data-floating-widget-drag-handle="note">
+              <label for="floating-saved-note-content">${escapeHTML(note.title || "STICKY NOTE")}</label>
+              <button type="button" class="app-floating-widget__close" data-floating-widget-close="note" aria-label="Unpin note">×</button>
+            </div>
+            <textarea id="floating-saved-note-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content || "")}</textarea>
+            <span class="app-floating-widget__caption">Saved note · edits sync automatically</span>
+          </aside>
+        `;
+      }
+    }
+  }
+  return `${timerHTML}${noteHTML}`;
+}
+
+function getFloatingWidgetPositionStyle(widget) {
+  if (!Number.isFinite(widget?.left) || !Number.isFinite(widget?.top)) return "";
+  const widgetWidth = Math.min(310, window.innerWidth - 16);
+  const left = Math.max(8, Math.min(window.innerWidth - widgetWidth - 8, widget.left));
+  const top = Math.max(8, Math.min(window.innerHeight - 80, widget.top));
+  return `left:${left}px;top:${top}px;right:auto;bottom:auto;`;
+}
+
+function preventFloatingWidgetOverlap(movingKind) {
+  const otherKind = movingKind === "timer" ? "note" : "timer";
+  const moving = document.querySelector(`.app-floating-${movingKind}`);
+  const other = document.querySelector(`.app-floating-${otherKind}`);
+  const storedOther = getFloatingWidget(otherKind);
+  if (!moving || !other || storedOther?.ownerId !== appWindowId) return;
+
+  const getWidgetBounds = (widget) => ({
+    left: widget.offsetLeft,
+    top: widget.offsetTop,
+    right: widget.offsetLeft + widget.offsetWidth,
+    bottom: widget.offsetTop + widget.offsetHeight,
+    width: widget.offsetWidth,
+    height: widget.offsetHeight,
+  });
+  const movingRect = getWidgetBounds(moving);
+  const otherRect = getWidgetBounds(other);
+  const overlaps = (a, b) => a.left < b.right && a.right > b.left &&
+    a.top < b.bottom && a.bottom > b.top;
+  if (!overlaps(movingRect, otherRect)) return;
+
+  const margin = 10;
+  const candidates = [
+    { left: movingRect.left, top: movingRect.top - otherRect.height - margin },
+    { left: movingRect.left, top: movingRect.bottom + margin },
+    { left: movingRect.left - otherRect.width - margin, top: movingRect.top },
+    { left: movingRect.right + margin, top: movingRect.top },
+    { left: 8, top: 8 },
+    { left: window.innerWidth - otherRect.width - 8, top: 8 },
+    { left: 8, top: window.innerHeight - otherRect.height - 8 },
+    { left: window.innerWidth - otherRect.width - 8, top: window.innerHeight - otherRect.height - 8 },
+  ].filter((candidate) =>
+    candidate.left >= 8 && candidate.top >= 8 &&
+    candidate.left + otherRect.width <= window.innerWidth - 8 &&
+    candidate.top + otherRect.height <= window.innerHeight - 8 &&
+    !overlaps(movingRect, {
+      left: candidate.left,
+      top: candidate.top,
+      right: candidate.left + otherRect.width,
+      bottom: candidate.top + otherRect.height,
+    })
+  );
+  if (!candidates.length) return;
+  candidates.sort((a, b) =>
+    Math.hypot(a.left - otherRect.left, a.top - otherRect.top) -
+    Math.hypot(b.left - otherRect.left, b.top - otherRect.top)
+  );
+  const position = candidates[0];
+  other.style.left = `${position.left}px`;
+  other.style.top = `${position.top}px`;
+  other.style.right = "auto";
+  other.style.bottom = "auto";
+  setFloatingWidget(otherKind, { ...storedOther, left: position.left, top: position.top });
+}
+
+function constrainAppFloatingWidgets() {
+  ["timer", "note"].forEach((kind) => {
+    const stored = getFloatingWidget(kind);
+    if (stored?.ownerId !== appWindowId || stored.mode !== "app") return;
+    const widget = document.querySelector(`.app-floating-${kind}`);
+    if (!widget) return;
+    const width = widget.offsetWidth;
+    const height = widget.offsetHeight;
+    const currentLeft = widget.offsetLeft;
+    const currentTop = widget.offsetTop;
+    const left = Math.max(8, Math.min(window.innerWidth - width - 8, currentLeft));
+    const top = Math.max(8, Math.min(window.innerHeight - height - 8, currentTop));
+    if (Math.abs(left - currentLeft) < 1 && Math.abs(top - currentTop) < 1) return;
+    widget.style.left = `${left}px`;
+    widget.style.top = `${top}px`;
+    widget.style.right = "auto";
+    widget.style.bottom = "auto";
+    setFloatingWidget(kind, { ...stored, left, top });
+  });
+  preventFloatingWidgetOverlap("timer");
+}
+
+window.addEventListener("resize", constrainAppFloatingWidgets);
+
+function attachAppFloatingWidgetHandlers() {
+  document.querySelectorAll("[data-floating-widget-close]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setFloatingWidget(button.dataset.floatingWidgetClose, null);
+      renderView();
+    });
+  });
+
+  const pauseButton = document.querySelector("[data-floating-timer-pause]");
+  if (pauseButton) {
+    pauseButton.addEventListener("click", () => {
+      const active = getActiveLockIn();
+      if (!active) return;
+      active.isPaused ? resumeLockIn(active.id) : pauseLockIn(active.id);
+      renderView();
+    });
+  }
+
+  document.querySelector("[data-floating-timer-add-time]")?.addEventListener("click", () => {
+    const active = getActiveLockIn();
+    if (!active) return;
+    addLockInTime(active.id, 10);
+    renderView();
+  });
+
+  const sessionNoteInput = document.getElementById("floating-session-note-content");
+  if (sessionNoteInput) {
+    sessionNoteInput.addEventListener("input", () => {
+      const active = getActiveLockIn();
+      if (!active) return;
+      active.sessionNote = sessionNoteInput.value.slice(0, 500);
+      saveState();
+      syncSessionNoteInput();
+      syncSessionNotePictureInPicture();
+    });
+  }
+
+  const savedNoteInput = document.getElementById("floating-saved-note-content");
+  if (savedNoteInput) {
+    savedNoteInput.addEventListener("input", () => {
+      const noteWidget = getFloatingWidget("note");
+      const note = noteWidget?.kind === "saved"
+        ? state.notes.find((item) => item.id === noteWidget.id)
+        : null;
+      if (!note) return;
+      note.content = savedNoteInput.value.slice(0, 2000);
+      note.updatedAt = new Date().toISOString();
+      saveState();
+      syncStickyNotePopupEditor(note);
+      syncSavedNotePictureInPicture();
+    });
+  }
+
+  document.querySelectorAll("[data-floating-widget-drag-handle]").forEach((handle) => {
+    const widget = handle.closest(".app-floating-widget");
+    if (!widget) return;
+    let pointerOffsetX = 0;
+    let pointerOffsetY = 0;
+    let position = null;
+    const moveWidget = (event) => {
+      if (!position) return;
+      const maxLeft = Math.max(8, window.innerWidth - widget.offsetWidth - 8);
+      const maxTop = Math.max(8, window.innerHeight - Math.min(widget.offsetHeight, window.innerHeight - 16) - 8);
+      position.left = Math.max(8, Math.min(maxLeft, event.clientX - pointerOffsetX));
+      position.top = Math.max(8, Math.min(maxTop, event.clientY - pointerOffsetY));
+      widget.style.left = `${position.left}px`;
+      widget.style.top = `${position.top}px`;
+      widget.style.right = "auto";
+      widget.style.bottom = "auto";
+    };
+    const stopMoving = () => {
+      if (!position) return;
+      handle.removeEventListener("pointermove", moveWidget);
+      handle.removeEventListener("pointerup", stopMoving);
+      handle.removeEventListener("pointercancel", stopMoving);
+      handle.classList.remove("is-dragging");
+      try {
+        handle.releasePointerCapture(position.pointerId);
+      } catch (error) {
+        if (error.name !== "NotFoundError") console.error("Could not release floating widget pointer:", error);
+      }
+      const kind = handle.dataset.floatingWidgetDragHandle;
+      const stored = getFloatingWidget(kind);
+      if (stored?.ownerId === appWindowId) {
+        setFloatingWidget(kind, { ...stored, left: position.left, top: position.top });
+        preventFloatingWidgetOverlap(kind);
+      }
+      position = null;
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button, input, textarea, select")) return;
+      const rect = widget.getBoundingClientRect();
+      position = {
+        pointerId: event.pointerId,
+        left: rect.left,
+        top: rect.top,
+      };
+      pointerOffsetX = event.clientX - rect.left;
+      pointerOffsetY = event.clientY - rect.top;
+      handle.classList.add("is-dragging");
+      handle.setPointerCapture(event.pointerId);
+      handle.addEventListener("pointermove", moveWidget);
+      handle.addEventListener("pointerup", stopMoving);
+      handle.addEventListener("pointercancel", stopMoving);
+      event.preventDefault();
+    });
+  });
+}
+
 // -------------------------------------
 // Render the current view into <main>
 // -------------------------------------
@@ -6956,12 +7513,35 @@ function renderView() {
   }
   document.body.classList.remove("is-sticky-note-window");
 
+  if (isLockInTimerWindow && !["consent", "login"].includes(currentView)) {
+    document.body.classList.add("is-lockin-timer-window");
+    const active = getActiveLockIn();
+    document.title = `${active?.title || "Lock In Timer"} — Questify`;
+    mainEl.innerHTML = renderLockInTimerPopup();
+    attachChallengesHandlers();
+    if (active && !lockInIntervalId) startLockInTicker();
+    return;
+  }
+  document.body.classList.remove("is-lockin-timer-window");
+
+  if (isSessionNoteWindow && !["consent", "login"].includes(currentView)) {
+    document.body.classList.add("is-session-note-window");
+    const active = getActiveLockIn();
+    document.title = `${active?.id === sessionNoteWindowId ? active.title : "Session Note"} — Questify`;
+    mainEl.innerHTML = active?.id === sessionNoteWindowId
+      ? `<section class="session-note-window"><header><div><p class="dashboard-section__eyebrow">QUESTIFY LOCK IN</p><h1>${escapeHTML(active.title)}</h1></div><button type="button" class="btn-secondary btn-sm" data-session-note-window-close>Close</button></header>${renderLockInStickyNote()}</section>`
+      : `<section class="session-note-window"><h1>Session note unavailable</h1><p class="text-muted">This Lock In session has ended.</p><button type="button" class="btn-secondary" data-session-note-window-close>Close window</button></section>`;
+    attachChallengesHandlers();
+    return;
+  }
+  document.body.classList.remove("is-session-note-window");
+
   if (isLockInFocusWindow && !["consent", "login"].includes(currentView)) {
     document.body.classList.add("is-lockin-focus-window");
     mainEl.innerHTML = `${renderLockInFocusWindow()}${renderLockInExitDialog()}`;
     attachLockInExitDialogHandlers();
     attachChallengesHandlers();
-    renderFloatingWidgets();
+    if (getActiveLockIn() && !lockInIntervalId) startLockInTicker();
     return;
   }
   document.body.classList.remove("is-lockin-focus-window");
@@ -6974,7 +7554,9 @@ function renderView() {
     return;
   }
 
-  mainEl.innerHTML = `${renderFn()}${renderLockInExitDialog()}${isTourActive ? renderTourOverlay() : ""}`;
+  mainEl.innerHTML = `${renderFn()}${renderLockInExitDialog()}${isTourActive ? renderTourOverlay() : ""}${renderAppFloatingWidgets()}`;
+  constrainAppFloatingWidgets();
+  attachAppFloatingWidgetHandlers();
   updateActiveNavButton();
   toggleHeaderVisibility();
   attachLockInExitDialogHandlers();
@@ -7025,7 +7607,6 @@ function renderView() {
     attachStickyNotesHandlers();
   }
 
-  renderFloatingWidgets();
   if (getActiveLockIn() && !lockInIntervalId) startLockInTicker();
 
   if (isTourActive) {
@@ -7191,7 +7772,6 @@ document.addEventListener("keydown", (event) => {
 
 window.addEventListener("resize", () => {
   applyNavigationLayout();
-  clampFloatingWidgetsToViewport();
 });
 
 // -------------------------------------
