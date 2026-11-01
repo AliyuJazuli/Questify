@@ -63,21 +63,55 @@
   <a href="#main-content" class="skip-link">Skip to main content</a>
 
   <div id="app">
+    <div id="pull-refresh-indicator" class="pull-refresh-indicator" role="status" aria-live="polite" aria-hidden="true">
+      <svg class="pull-refresh-indicator__mark" viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <linearGradient id="pull-refresh-logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#f59e0b" />
+            <stop offset="100%" stop-color="#d97706" />
+          </linearGradient>
+        </defs>
+        <circle class="pull-refresh-indicator__ring" cx="32" cy="32" r="29" />
+        <g class="pull-refresh-indicator__logo">
+          <rect class="pull-refresh-indicator__tile" x="2" y="2" width="60" height="60" rx="14" />
+          <path class="pull-refresh-indicator__check" d="M18 32 27 41 47 20" />
+        </g>
+      </svg>
+      <span id="pull-refresh-label">Pull to refresh</span>
+    </div>
     <header class="app-header" id="app-header">
       <div class="container app-header__inner">
-        <h1 class="app-header__logo">
-          <img src="logo.svg" alt="" class="app-header__icon" width="20" height="28">
-          Questify 
-        </h1>
-        
+        <div class="app-sidebar-heading">
+          <h1 class="app-header__logo">
+            <img src="logo.svg" alt="" class="app-header__icon" width="28" height="28">
+            <span class="nav-label">Questify</span>
+          </h1>
+          <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation">‹</button>
+        </div>
         <nav class="app-nav" aria-label="Main navigation">
-          <button class="app-nav__btn" data-view="dashboard">Dashboard</button>
-          <button class="app-nav__btn" data-view="habits">Habits</button>
-          <button class="app-nav__btn" data-view="challenges">Challenges</button>
-          <button class="app-nav__btn" data-view="calendar">Calendar</button>
-          <button class="app-nav__btn" data-view="badges">Badges</button>
-          <button class="app-nav__btn" data-view="profile">Profile</button>
-          <button class="app-nav__btn" data-view="settings">Settings</button>
+          <div class="app-nav-primary" aria-label="Primary destinations">
+            <div class="app-nav-section" aria-label="Workspace">
+              <span class="app-nav-section__label nav-label">Workspace</span>
+              <button class="app-nav__btn" data-view="dashboard" aria-label="Dashboard" title="Dashboard"><span class="nav-icon" aria-hidden="true">⌂</span><span class="nav-label">Dashboard</span></button>
+              <button class="app-nav__btn" data-view="habits" aria-label="Habits" title="Habits"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-label">Habits</span></button>
+              <button class="app-nav__btn" data-view="calendar" aria-label="Calendar" title="Calendar"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-label">Calendar</span></button>
+              <button class="app-nav__btn" data-view="challenges" aria-label="Challenges" title="Challenges"><span class="nav-icon" aria-hidden="true">◎</span><span class="nav-label">Challenges</span></button>
+            </div>
+          </div>
+          <div class="app-nav-secondary" aria-label="More destinations">
+            <div class="app-nav-more-menu" id="app-nav-more">
+              <div class="app-nav-section app-nav-section--more" aria-label="Progress">
+                <span class="app-nav-section__label nav-label">Progress</span>
+                <button class="app-nav__btn" data-view="badges" aria-label="Badges" title="Badges"><span class="nav-icon" aria-hidden="true">✦</span><span class="nav-label">Badges</span></button>
+              </div>
+              <div class="app-nav-section app-nav-section--more" aria-label="Account">
+                <span class="app-nav-section__label nav-label">Account</span>
+                <button class="app-nav__btn" data-view="profile" aria-label="Profile" title="Profile"><span class="nav-icon" aria-hidden="true">◉</span><span class="nav-label">Profile</span></button>
+                <button class="app-nav__btn" data-view="settings" aria-label="Settings" title="Settings"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-label">Settings</span></button>
+              </div>
+            </div>
+            <button type="button" class="app-nav__btn app-nav__more-toggle" id="nav-more-toggle" aria-expanded="false" aria-controls="app-nav-more" aria-label="More navigation" title="More"><span class="nav-icon" aria-hidden="true">•••</span><span class="nav-label">More</span></button>
+          </div>
         </nav>
 
         <div class="notif-bell-wrapper">

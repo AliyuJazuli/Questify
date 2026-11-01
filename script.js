@@ -19,7 +19,7 @@
 
 const appRoot = document.getElementById("app");
 const mainEl = document.querySelector(".app-main");
-const navButtons = document.querySelectorAll(".app-nav__btn");
+const navButtons = document.querySelectorAll(".app-nav__btn[data-view]");
 
 if (!appRoot || !mainEl) {
   console.error("Fatal: required app containers not found in HTML.");
@@ -29,6 +29,7 @@ if (!appRoot || !mainEl) {
 // State: single source of truth
 // -------------------------------------
 const STORAGE_KEY = "questify_state";
+const LEGAL_POLICY_VERSION = "1.0";
 
 // -------------------------------------
 // App-wide configuration constants
@@ -40,7 +41,7 @@ const CONFIG = {
   MAX_NOTIFICATIONS: 20,
   XP_PER_LEVEL_MULTIPLIER: 100,
   DEFAULT_DAILY_GOAL: 3,
-  HABIT_COMPLETION_XP: 5,
+  HABIT_XP_REWARDS: Object.freeze({ easy: 3, medium: 5, hard: 8 }),
 };
 
 const APP_THEMES = [
@@ -62,10 +63,13 @@ function getDefaultState() {
       lastCompletedDate: null,
       isOnboarded: false,
       hasSeenTour: false,
+      hasCompletedTour: false,
       dailyGoal: CONFIG.DEFAULT_DAILY_GOAL,
     },
     challenges: [],
     habits: [],
+    habitXpLedger: [],
+    legalAcceptance: null,
     unlockedBadgeIds: [],
     notifications: [],
     preferences: {
@@ -75,6 +79,9 @@ function getDefaultState() {
       remindersEnabled: false,
       lastReminderDate: null,
       blockNotificationsDuringLockIn: false,
+      lastLockInDuration: 60,
+      sidebarCollapsed: false,
+      navigationMode: "auto",
     },
   };
 }
@@ -107,6 +114,16 @@ function loadState() {
       state = {
         ...defaultState,
         ...savedState,
+        legalAcceptance: savedState.legalAcceptance && typeof savedState.legalAcceptance === "object"
+          ? {
+              policyVersion: typeof savedState.legalAcceptance.policyVersion === "string"
+                ? savedState.legalAcceptance.policyVersion
+                : "",
+              acceptedAt: typeof savedState.legalAcceptance.acceptedAt === "string"
+                ? savedState.legalAcceptance.acceptedAt
+                : "",
+            }
+          : null,
         habits: Array.isArray(savedState.habits)
           ? savedState.habits
               .filter((habit) => habit && typeof habit === "object")
@@ -114,6 +131,13 @@ function loadState() {
                 ...habit,
                 id: typeof habit.id === "string" ? habit.id : generateId(),
                 title: typeof habit.title === "string" ? habit.title : "",
+                description: typeof habit.description === "string" ? habit.description : "",
+                difficulty: ["easy", "medium", "hard"].includes(habit.difficulty) ? habit.difficulty : "medium",
+                createdDate: /^\d{4}-\d{2}-\d{2}$/.test(habit.createdDate || "")
+                  ? habit.createdDate
+                  : typeof habit.createdAt === "string" && /^\d{4}-\d{2}-\d{2}/.test(habit.createdAt)
+                  ? habit.createdAt.slice(0, 10)
+                  : getTodayDateString(),
                 completedDates: Array.isArray(habit.completedDates)
                   ? [...new Set(habit.completedDates.filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)))]
                   : [],
@@ -123,13 +147,35 @@ function loadState() {
                 archived: Boolean(habit.archived),
               }))
           : defaultState.habits,
+        habitXpLedger: Array.isArray(savedState.habitXpLedger)
+          ? savedState.habitXpLedger.filter((entry) =>
+              entry && typeof entry.habitId === "string" &&
+              /^\d{4}-\d{2}-\d{2}$/.test(entry.date) &&
+              Number.isFinite(entry.amount) && entry.amount > 0
+            )
+          : (Array.isArray(savedState.habits) ? savedState.habits : []).flatMap((habit) =>
+              (Array.isArray(habit?.xpAwardedDates) ? habit.xpAwardedDates : [])
+                .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+                .map((date) => ({
+                  id: `${habit.id || "legacy"}:${date}`,
+                  habitId: typeof habit.id === "string" ? habit.id : "legacy",
+                  habitTitle: typeof habit.title === "string" ? habit.title : "Habit",
+                  date,
+                  amount: CONFIG.HABIT_XP_REWARDS.medium,
+                }))
+            ),
         user: {
           ...defaultState.user,
           ...savedState.user,
+          hasCompletedTour: Boolean(savedState.user?.hasCompletedTour ?? savedState.user?.hasSeenTour),
         },
         preferences: {
           ...defaultState.preferences,
           ...savedState.preferences,
+          navigationMode: ["auto", "sidebar", "bottom"].includes(savedState.preferences?.navigationMode)
+            ? savedState.preferences.navigationMode
+            : "auto",
+          lastLockInDuration: Math.min(240, Math.max(1, Number(savedState.preferences?.lastLockInDuration) || defaultState.preferences.lastLockInDuration)),
           theme: APP_THEMES.some((theme) => theme.id === migratedTheme)
             ? migratedTheme
             : defaultState.preferences.theme,
@@ -158,8 +204,17 @@ let statusFilter = "all"; // "all" | "active" | "completed" | "archived"
 let dueFilter = "all"; // "all" | "today" | "week" - which challenges show by scheduled date
 let isConfirmingReset = false;
 let tourStep = 0; // which onboarding tour slide is showing (0-2)
+let tourTargetView = "dashboard";
+let isTourActive = false;
+let previouslyOnboarded = false;
 let lockInIntervalId = null; // ticks the active Lock In session's live timer
 let dayDetailDate = null; // "YYYY-MM-DD" of the weekly-view day whose detail modal is open, or null
+let calendarSelectedDate = getTodayDateString();
+let calendarViewMode = "month";
+let habitAnalyticsPeriod = "week";
+let editingHabitId = null;
+let confirmingHabitDeleteId = null;
+let isSidebarCollapsed = false;
 
 // Singleton debounced functions to prevent memory leaks
 let debouncedSearchRerender = null;
@@ -212,8 +267,23 @@ function completeOnboarding(name) {
   saveState();
 }
 
+function acceptCurrentPolicies() {
+  state.legalAcceptance = {
+    policyVersion: LEGAL_POLICY_VERSION,
+    acceptedAt: new Date().toISOString(),
+  };
+  saveState();
+  if (previouslyOnboarded) {
+    navigateTo("dashboard");
+  } else {
+    navigateTo("login");
+  }
+}
+
 function logout() {
+  const legalAcceptance = state.legalAcceptance;
   state = getDefaultState();
+  state.legalAcceptance = legalAcceptance;
   saveState();
   navigateTo("login");
 }
@@ -221,7 +291,7 @@ function logout() {
 function toggleHeaderVisibility() {
   const headerEl = document.getElementById("app-header");
   if (!headerEl) return;
-  headerEl.classList.toggle("is-hidden", currentView === "login");
+  headerEl.classList.toggle("is-hidden", ["login", "consent"].includes(currentView));
 }
 
 // -------------------------------------
@@ -267,9 +337,11 @@ function getReminderPermissionMessage() {
 // -------------------------------------
 function resetAllData() {
   const nameBackup = state.user.name;
+  const legalAcceptance = state.legalAcceptance;
   state = getDefaultState();
   state.user.name = nameBackup;
   state.user.isOnboarded = true;
+  state.legalAcceptance = legalAcceptance;
   saveState();
   applyTheme();
   isConfirmingReset = false;
@@ -614,23 +686,64 @@ function deleteChallenge(id) {
   saveState();
 }
 
-function addHabit(title) {
+function addHabit(title, description = "", difficulty = "medium") {
   const result = validateText(title, {
     ...VALIDATION_RULES.challengeTitle,
     fieldName: "Habit name",
   });
   if (!result.isValid) return { ok: false, error: result.errorMessage };
+  const cleanDescription = typeof description === "string" ? description.trim() : "";
+  if (cleanDescription.length > 180) {
+    return { ok: false, error: "Habit descriptions must be 180 characters or fewer." };
+  }
 
   state.habits.push({
     id: generateId(),
     title: result.value,
     createdAt: new Date().toISOString(),
+    createdDate: getTodayDateString(),
+    description: cleanDescription,
+    difficulty: CONFIG.HABIT_XP_REWARDS[difficulty] ? difficulty : "medium",
     completedDates: [],
     xpAwardedDates: [],
     archived: false,
   });
   saveState();
   return { ok: true };
+}
+
+function editHabit(id, title, description, difficulty) {
+  const habit = state.habits.find((item) => item.id === id);
+  if (!habit) return { ok: false, error: "This habit could not be found." };
+  const result = validateText(title, {
+    ...VALIDATION_RULES.challengeTitle,
+    fieldName: "Habit name",
+  });
+  if (!result.isValid) return { ok: false, error: result.errorMessage };
+  const cleanDescription = typeof description === "string" ? description.trim() : "";
+  if (cleanDescription.length > 180) {
+    return { ok: false, error: "Habit descriptions must be 180 characters or fewer." };
+  }
+
+  habit.title = result.value;
+  habit.description = cleanDescription;
+  if (CONFIG.HABIT_XP_REWARDS[difficulty]) habit.difficulty = difficulty;
+  saveState();
+  return { ok: true };
+}
+
+function deleteHabit(id) {
+  const index = state.habits.findIndex((habit) => habit.id === id);
+  if (index < 0) return false;
+  state.habits.splice(index, 1);
+  saveState();
+  return true;
+}
+
+function getHabitXpForDate(dateStr, s = state) {
+  return (s.habitXpLedger || [])
+    .filter((entry) => entry.date === dateStr)
+    .reduce((total, entry) => total + entry.amount, 0);
 }
 
 function toggleHabitCompletion(id, dateStr = getTodayDateString()) {
@@ -654,7 +767,18 @@ function toggleHabitCompletion(id, dateStr = getTodayDateString()) {
   habit.completedDates.push(dateStr);
   if (!habit.xpAwardedDates.includes(dateStr)) {
     habit.xpAwardedDates.push(dateStr);
-    awardXp(CONFIG.HABIT_COMPLETION_XP, { skipSave: true });
+    const reward = CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium;
+    state.habitXpLedger = Array.isArray(state.habitXpLedger) ? state.habitXpLedger : [];
+    if (!state.habitXpLedger.some((entry) => entry.id === `${habit.id}:${dateStr}`)) {
+      state.habitXpLedger.push({
+        id: `${habit.id}:${dateStr}`,
+        habitId: habit.id,
+        habitTitle: habit.title,
+        date: dateStr,
+        amount: reward,
+      });
+      awardXp(reward, { skipSave: true });
+    }
   }
   if (dateStr === getTodayDateString()) updateStreak();
   checkBadges({ skipSave: true });
@@ -699,11 +823,186 @@ function getLongestHabitStreak(s = state) {
   return longest;
 }
 
+function getOverallHabitStreakStats(s = state, today = getTodayDateString()) {
+  const dates = new Set(getHabitCompletionDates(s));
+  let current = 0;
+  let cursor = dates.has(today) ? today : addDaysToDateString(today, -1);
+  while (dates.has(cursor)) {
+    current += 1;
+    cursor = addDaysToDateString(cursor, -1);
+  }
+  return { current, longest: getLongestHabitStreak(s) };
+}
+
 function getTotalHabitCompletions(s = state) {
   return (s.habits || []).reduce(
     (total, habit) => total + (Array.isArray(habit.completedDates) ? habit.completedDates.length : 0),
     0
   );
+}
+
+function addDaysToDateString(dateStr, offset) {
+  const date = new Date(`${dateStr}T00:00:00`);
+  date.setDate(date.getDate() + offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function getHabitStreakStats(habit, today = getTodayDateString()) {
+  const dates = new Set(Array.isArray(habit.completedDates) ? habit.completedDates : []);
+  let longest = 0;
+  let streak = 0;
+  let previous = null;
+  [...dates].sort().forEach((date) => {
+    streak = previous && getDaysBetween(previous, date) === 1 ? streak + 1 : 1;
+    longest = Math.max(longest, streak);
+    previous = date;
+  });
+
+  let current = 0;
+  let cursor = dates.has(today) ? today : addDaysToDateString(today, -1);
+  while (dates.has(cursor)) {
+    current += 1;
+    cursor = addDaysToDateString(cursor, -1);
+  }
+  return { current, longest };
+}
+
+function getHabitCompletionRate(habits, startDate, endDate) {
+  let expected = 0;
+  let completed = 0;
+  const today = getTodayDateString();
+  const effectiveEnd = endDate > today ? today : endDate;
+  if (effectiveEnd < startDate) return { expected, completed, percent: 0 };
+
+  habits.forEach((habit) => {
+    const firstEligibleDate = habit.createdDate || (habit.createdAt || "").slice(0, 10) || startDate;
+    let cursor = firstEligibleDate > startDate ? firstEligibleDate : startDate;
+    while (cursor <= effectiveEnd) {
+      expected += 1;
+      if (Array.isArray(habit.completedDates) && habit.completedDates.includes(cursor)) completed += 1;
+      cursor = addDaysToDateString(cursor, 1);
+    }
+  });
+  return { expected, completed, percent: expected ? Math.round((completed / expected) * 100) : 0 };
+}
+
+function getHabitOverallCompletionRate(habits = getActiveHabits()) {
+  const today = getTodayDateString();
+  const firstHabitDate = habits
+    .map((habit) => habit.createdDate || (habit.createdAt || "").slice(0, 10))
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+    .sort()[0];
+  return firstHabitDate
+    ? getHabitCompletionRate(habits, firstHabitDate, today).percent
+    : 0;
+}
+
+function getHabitAnalytics(period = "week") {
+  const today = getTodayDateString();
+  const activeHabits = getActiveHabits();
+  const todayDate = new Date(`${today}T00:00:00`);
+  let startDate = today;
+  let endDate = today;
+
+  if (period === "week") {
+    startDate = addDaysToDateString(today, -todayDate.getDay());
+    endDate = addDaysToDateString(startDate, 6);
+  } else if (period === "month") {
+    startDate = `${today.slice(0, 8)}01`;
+    endDate = `${today.slice(0, 7)}-${String(new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
+  }
+
+  const rate = getHabitCompletionRate(activeHabits, startDate, endDate);
+  const completedHabits = activeHabits.filter((habit) =>
+    (habit.completedDates || []).some((date) => date >= startDate && date <= today)
+  );
+  const missedHabits = activeHabits.filter((habit) => {
+    const firstEligibleDate = habit.createdDate || (habit.createdAt || "").slice(0, 10) || startDate;
+    const from = firstEligibleDate > startDate ? firstEligibleDate : startDate;
+    for (let cursor = from; cursor <= today; cursor = addDaysToDateString(cursor, 1)) {
+      if (!(habit.completedDates || []).includes(cursor)) return true;
+    }
+    return false;
+  });
+  const consistency = activeHabits.map((habit) => {
+    const habitRate = getHabitCompletionRate([habit], startDate, endDate);
+    return { habit, ...habitRate, ...getHabitStreakStats(habit, today) };
+  }).sort((a, b) => b.percent - a.percent || b.current - a.current);
+
+  let dailyPoints = [];
+  if (period === "day") {
+    const completedToday = getHabitCompletionsForDate(today);
+    dailyPoints = [{ label: "Today", percent: activeHabits.length ? Math.round((completedToday.length / activeHabits.length) * 100) : 0 }];
+  } else if (period === "week") {
+    dailyPoints = Array.from({ length: 7 }, (_, index) => {
+      const date = addDaysToDateString(startDate, index);
+      const dayRate = getHabitCompletionRate(activeHabits, date, date);
+      return {
+        label: CALENDAR_WEEKDAY_LABELS[new Date(`${date}T00:00:00`).getDay()],
+        date,
+        percent: dayRate.percent,
+      };
+    }).filter((point) => point.date <= today);
+  } else {
+    const monthLength = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate();
+    const buckets = Math.ceil(monthLength / 7);
+    dailyPoints = Array.from({ length: buckets }, (_, index) => {
+      const from = addDaysToDateString(startDate, index * 7);
+      const to = addDaysToDateString(startDate, Math.min(index * 7 + 6, monthLength - 1));
+      const bucketRate = getHabitCompletionRate(activeHabits, from, to);
+      return { label: `Week ${index + 1}`, percent: bucketRate.percent };
+    });
+  }
+
+  const todayCompleted = getHabitCompletionsForDate(today);
+  const currentMonthRate = getHabitCompletionRate(activeHabits, startDate, today);
+  const priorMonthStart = `${new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1).getFullYear()}-${String(new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1).getMonth() + 1).padStart(2, "0")}-01`;
+  const priorMonthEndDay = Math.min(todayDate.getDate(), new Date(todayDate.getFullYear(), todayDate.getMonth(), 0).getDate());
+  const priorMonthEnd = `${priorMonthStart.slice(0, 7)}-${String(priorMonthEndDay).padStart(2, "0")}`;
+  const priorMonthRate = getHabitCompletionRate(activeHabits, priorMonthStart, priorMonthEnd);
+  const overallStreak = getOverallHabitStreakStats(state, today);
+  let bestPerformingDay = null;
+  if (period === "month") {
+    const weekdayTotals = Array.from({ length: 7 }, (_, weekday) => {
+      let completed = 0;
+      let expected = 0;
+      for (let cursor = startDate; cursor <= today; cursor = addDaysToDateString(cursor, 1)) {
+        if (new Date(`${cursor}T00:00:00`).getDay() !== weekday) continue;
+        const dayRate = getHabitCompletionRate(activeHabits, cursor, cursor);
+        completed += dayRate.completed;
+        expected += dayRate.expected;
+      }
+      return { weekday, percent: expected ? Math.round((completed / expected) * 100) : -1 };
+    }).filter((item) => item.percent >= 0);
+    if (weekdayTotals.length) {
+      const best = weekdayTotals.sort((a, b) => b.percent - a.percent)[0];
+      bestPerformingDay = { label: CALENDAR_WEEKDAY_LABELS[best.weekday], percent: best.percent };
+    }
+  }
+
+  return {
+    period,
+    startDate,
+    endDate: endDate > today ? today : endDate,
+    percent: rate.percent,
+    completed: rate.completed,
+    expected: rate.expected,
+    activeCount: activeHabits.length,
+    totalCount: (state.habits || []).length,
+    overallPercent: getHabitOverallCompletionRate(activeHabits),
+    completedHabitCount: completedHabits.length,
+    todayCompleted: todayCompleted.length,
+    todayRemaining: Math.max(0, activeHabits.length - todayCompleted.length),
+    currentStreak: overallStreak.current,
+    bestStreak: overallStreak.longest,
+    dailyPoints,
+    consistentHabits: consistency.slice(0, 3),
+    missedHabits,
+    monthlyDelta: priorMonthRate.expected
+      ? currentMonthRate.percent - priorMonthRate.percent
+      : null,
+    bestPerformingDay,
+  };
 }
 
 // -------------------------------------
@@ -801,6 +1100,11 @@ function formatLockInDuration(totalSeconds) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function formatLockInClock(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 // Base minutes (up to the target) earn the difficulty's flat rate;
 // anything beyond the original target earns that rate boosted by the
 // overtime multiplier. Difficulty affects the rate, not a fixed total,
@@ -822,7 +1126,7 @@ function getLockInElapsedSeconds(challenge) {
   return accumulated + Math.floor((Date.now() - new Date(challenge.startedAt).getTime()) / 1000);
 }
 
-function startLockIn(title, targetMinutes, difficulty = "medium") {
+function startLockIn(title, targetMinutes, difficulty = "medium", quietFocusEnabled = state.preferences.blockNotificationsDuringLockIn) {
   const result = validateText(title, {
     ...VALIDATION_RULES.challengeTitle,
     fieldName: "Session title",
@@ -842,6 +1146,8 @@ function startLockIn(title, targetMinutes, difficulty = "medium") {
   }
 
   const finalDifficulty = DIFFICULTY_CONFIG[difficulty] ? difficulty : "medium";
+  state.preferences.lastLockInDuration = minutes;
+  state.preferences.blockNotificationsDuringLockIn = Boolean(quietFocusEnabled);
 
   const newSession = {
     id: generateId(),
@@ -937,12 +1243,15 @@ function updateLockInTimerDisplay() {
   const elapsedSec = getLockInElapsedSeconds(active);
   const targetSec = active.targetMinutes * 60;
   const overBy = elapsedSec - targetSec;
+  const remainingSec = Math.max(0, targetSec - elapsedSec);
   const circumference = 2 * Math.PI * 48;
   const projectedXp = computeLockInXp(active.targetMinutes, Math.max(1, Math.round(elapsedSec / 60)), active.difficulty);
   const progressPercent = Math.min(100, (elapsedSec / targetSec) * 100);
 
   if (overBy >= 0) {
-    timeEl.textContent = `${formatLockInDuration(targetSec)} target + ${formatLockInDuration(overBy)} over`;
+    timeEl.textContent = overBy === 0
+      ? "Focus block complete"
+      : `${formatLockInClock(overBy)} overtime`;
     if (statusEl) {
       statusEl.textContent = active.isPaused ? "⏸️ Paused (in overtime)" : "🔥 Overtime - keep going or finish anytime";
       statusEl.classList.toggle("is-overtime", !active.isPaused);
@@ -960,7 +1269,7 @@ function updateLockInTimerDisplay() {
       triggerCompletionFeedback();
     }
   } else {
-    timeEl.textContent = `${formatLockInDuration(elapsedSec)} / ${active.targetMinutes}m target`;
+    timeEl.textContent = `${formatLockInClock(remainingSec)} remaining`;
     if (statusEl) {
       statusEl.textContent = active.isPaused ? "⏸️ Paused" : "Locked in...";
       statusEl.classList.remove("is-overtime");
@@ -1011,12 +1320,12 @@ function renderLockInExitDialog() {
         <p class="dashboard-section__eyebrow">YOUR FOCUS SESSION</p>
         <h2 id="lockin-exit-title">Your Lock In was paused</h2>
         <p id="lockin-exit-description" class="text-muted">
-          The timer stopped when you left. Cancel the timer and exit, finish your session, or quit with it paused.
+          The timer stopped when you left. Cancel the timer, finish your session, or leave it paused.
         </p>
         <div class="lockin-exit-dialog__actions">
           <button type="button" class="btn-secondary" data-lockin-exit-action="cancel">Cancel timer &amp; exit</button>
           <button type="button" class="btn" data-lockin-exit-action="finish">Finish session</button>
-          <button type="button" class="btn-secondary" data-lockin-exit-action="quit">Quit with timer paused</button>
+          <button type="button" class="btn-secondary" data-lockin-exit-action="quit">Leave with timer paused</button>
         </div>
       </section>
     </div>
@@ -1044,7 +1353,7 @@ function attachLockInExitDialogHandlers() {
         case "quit":
           active.wasInterrupted = false;
           saveState();
-          renderView();
+          navigateTo("dashboard");
           break;
         default:
           console.error(`Unknown Lock In exit action: "${button.dataset.lockinExitAction}"`);
@@ -1756,7 +2065,7 @@ const BADGES = [
     name: "Orientation Complete",
     description: "Finish the onboarding tour",
     icon: "🎓",
-    condition: (s) => s.user.hasSeenTour === true,
+    condition: (s) => s.user.hasCompletedTour === true,
   },
 
   // --- Meta badges (badges about badges) ---
@@ -2082,30 +2391,82 @@ let weekViewDate = new Date(); // defaults to current week on load
 // Habit Calendar: data aggregation
 // -------------------------------------
 
-// Returns a map of "YYYY-MM-DD" -> combined challenge and habit activity
-// count for the given year/month (0-indexed month, JS convention).
-function getCompletionCountsForMonth(year, month) {
-  const counts = {};
+// Returns actual habit, challenge, and XP activity keyed by date for a month.
+function getCalendarActivityForMonth(year, month) {
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const activityByDate = new Map();
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const eligibleHabits = getActiveHabits().filter((habit) =>
+      (habit.createdDate || (habit.createdAt || "").slice(0, 10)) <= dateStr
+    );
+    const completedHabits = getHabitCompletionsForDate(dateStr);
+    activityByDate.set(dateStr, {
+      count: completedHabits.length,
+      habitCount: completedHabits.length,
+      habitTotal: eligibleHabits.length,
+      challengeCount: 0,
+      xp: getHabitXpForDate(dateStr),
+    });
+  }
 
-  getCompletedChallenges().forEach((c) => {
-    const referenceDate = c.dateCompleted || c.dateCreated;
-    const d = new Date(referenceDate);
-    if (d.getFullYear() === year && d.getMonth() === month) {
-      const key = referenceDate.slice(0, 10);
-      counts[key] = (counts[key] || 0) + 1;
+  getCompletedChallenges().forEach((challenge) => {
+    const dateStr = (challenge.dateCompleted || challenge.dateCreated || "").slice(0, 10);
+    const activity = activityByDate.get(dateStr);
+    if (!activity) return;
+    activity.challengeCount += 1;
+    activity.count += 1;
+    activity.xp += Number(challenge.xpValue) || 0;
+  });
+
+  return activityByDate;
+}
+
+function getCalendarMonthSummary(year, month) {
+  const activityByDate = getCalendarActivityForMonth(year, month);
+  const today = getTodayDateString();
+  let habitCheckIns = 0;
+  let challengeWins = 0;
+  let xpEarned = 0;
+  let expectedHabitCheckIns = 0;
+  let daysWithActivity = 0;
+  let currentRun = 0;
+  let bestRun = 0;
+  let bestDay = null;
+  const monthStart = `${year}-${String(month + 1).padStart(2, "0")}-01`;
+  const trackedDates = [...activityByDate.keys()].filter((dateStr) => dateStr <= today);
+
+  trackedDates.forEach((dateStr) => {
+    const activity = activityByDate.get(dateStr);
+    habitCheckIns += activity.habitCount;
+    challengeWins += activity.challengeCount;
+    xpEarned += activity.xp;
+    expectedHabitCheckIns += activity.habitTotal;
+
+    if (activity.count > 0) {
+      daysWithActivity += 1;
+      currentRun += 1;
+      bestRun = Math.max(bestRun, currentRun);
+      if (!bestDay || activity.count > bestDay.count) {
+        bestDay = { date: dateStr, count: activity.count };
+      }
+    } else {
+      currentRun = 0;
     }
   });
 
-  (state.habits || []).forEach((habit) => {
-    (Array.isArray(habit.completedDates) ? habit.completedDates : []).forEach((dateStr) => {
-      const d = new Date(`${dateStr}T00:00:00`);
-      if (d.getFullYear() === year && d.getMonth() === month) {
-        counts[dateStr] = (counts[dateStr] || 0) + 1;
-      }
-    });
-  });
-
-  return counts;
+  return {
+    habitCheckIns,
+    challengeWins,
+    xpEarned,
+    completionRate: expectedHabitCheckIns
+      ? Math.round((habitCheckIns / expectedHabitCheckIns) * 100)
+      : null,
+    daysWithActivity,
+    bestRun,
+    bestDay,
+    hasTrackedDates: trackedDates.length > 0 && trackedDates[trackedDates.length - 1] >= monthStart,
+  };
 }
 
 // Builds the full grid of calendar cells for a given month, including
@@ -2115,7 +2476,7 @@ function getCalendarGridData(year, month) {
   const startDayOfWeek = firstOfMonth.getDay(); // 0 = Sunday
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const counts = getCompletionCountsForMonth(year, month);
+  const activityByDate = getCalendarActivityForMonth(year, month);
   const todayStr = getTodayDateString();
 
   const cells = [];
@@ -2130,12 +2491,27 @@ function getCalendarGridData(year, month) {
   // Actual days of the month
   for (let day = 1; day <= daysInMonth; day++) {
     const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const activity = activityByDate.get(dateStr);
+    const habitStatus = dateStr > todayStr
+      ? "upcoming"
+      : activity.habitTotal === 0
+      ? "empty"
+      : activity.habitCount >= activity.habitTotal
+      ? "complete"
+      : activity.habitCount > 0
+      ? "partial"
+      : "missed";
     cells.push({
       day,
       inMonth: true,
       dateStr,
-      count: counts[dateStr] || 0,
+      count: activity.count,
+      habitCount: activity.habitCount,
+      habitTotal: activity.habitTotal,
+      challengeCount: activity.challengeCount,
+      xp: activity.xp,
       isToday: dateStr === todayStr,
+      habitStatus,
     });
   }
 
@@ -2184,10 +2560,12 @@ function getWeeklyWins() {
       })
       .map((dateStr) => ({ habit, dateStr }))
   );
+  const weekStartDate = addDaysToDateString(getTodayDateString(), -now.getDay());
+  const weekEndDate = addDaysToDateString(weekStartDate, 6);
   const xpEarned = thisWeekCompletions.reduce((sum, c) => sum + c.xpValue, 0) +
-    thisWeekHabitCompletions.filter(({ habit, dateStr }) =>
-      Array.isArray(habit.xpAwardedDates) && habit.xpAwardedDates.includes(dateStr)
-    ).length * CONFIG.HABIT_COMPLETION_XP;
+    (state.habitXpLedger || [])
+      .filter((entry) => entry.date >= weekStartDate && entry.date <= weekEndDate)
+      .reduce((sum, entry) => sum + entry.amount, 0);
 
   // Find the day with the most completions this week
   const dayCounts = {};
@@ -2610,6 +2988,24 @@ function renderResumeLockInBanner() {
   `;
 }
 
+function renderDashboardLockInCta() {
+  if (getActiveLockIn()) return "";
+
+  return `
+    <section class="dashboard-lockin-cta card" aria-label="Start a focus session">
+      <div class="dashboard-lockin-cta__icon" aria-hidden="true">🔒</div>
+      <div class="dashboard-lockin-cta__copy">
+        <p class="dashboard-section__eyebrow">MAKE SPACE FOR FOCUS</p>
+        <h3>Ready to lock in?</h3>
+        <p class="text-muted">Set a focus timer, choose your session, and give your next task your full attention.</p>
+      </div>
+      <button type="button" class="btn dashboard-lockin-cta__button" id="dashboard-lockin-btn">
+        <span>Start Lock In</span><span aria-hidden="true">↗</span>
+      </button>
+    </section>
+  `;
+}
+
 function renderDashboardHabitSummary() {
   const habits = getActiveHabits();
   const today = getTodayDateString();
@@ -2779,7 +3175,11 @@ function getWeekGridData(refDate) {
     const activeThatDay = state.challenges.filter(
       (c) => !c.completed && getChallengeScheduledDate(c) === dateStr
     );
-    const completedHabitsThatDay = getHabitCompletionsForDate(dateStr, state, true);
+    const completedHabitsThatDay = getHabitCompletionsForDate(dateStr);
+    const eligibleHabits = getActiveHabits().filter((habit) =>
+      (habit.createdDate || (habit.createdAt || "").slice(0, 10)) <= dateStr
+    );
+    const challengeXp = completedThatDay.reduce((total, challenge) => total + (Number(challenge.xpValue) || 0), 0);
 
     days.push({
       dateStr,
@@ -2790,6 +3190,8 @@ function getWeekGridData(refDate) {
       completed: completedThatDay,
       active: activeThatDay,
       habits: completedHabitsThatDay,
+      habitTotal: eligibleHabits.length,
+      xp: getHabitXpForDate(dateStr) + challengeXp,
     });
   }
 
@@ -2804,6 +3206,96 @@ const CALENDAR_MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ];
 const CALENDAR_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function renderCalendarDayDetails(dateStr) {
+  const date = new Date(`${dateStr}T00:00:00`);
+  const label = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(date);
+  const eligibleHabits = (state.habits || []).filter((habit) =>
+    (habit.createdDate || (habit.createdAt || "").slice(0, 10)) <= dateStr
+  );
+  const completedHabits = getHabitCompletionsForDate(dateStr, state, true)
+    .filter((habit) => eligibleHabits.some((eligible) => eligible.id === habit.id));
+  const completedIds = new Set(completedHabits.map((habit) => habit.id));
+  const activeHabits = eligibleHabits.filter((habit) => !habit.archived);
+  const completedCount = activeHabits.filter((habit) => completedIds.has(habit.id)).length;
+  const completionPercent = activeHabits.length ? Math.round((completedCount / activeHabits.length) * 100) : 0;
+  const challenges = getDayDetail(dateStr);
+  const challengeXp = challenges.completed.reduce((total, challenge) => total + challenge.xpValue, 0);
+  const habitXp = getHabitXpForDate(dateStr);
+  const recentDates = Array.from({ length: 7 }, (_, index) => addDaysToDateString(dateStr, index - 6));
+  const bestStreak = getOverallHabitStreakStats(state, dateStr);
+  const canCheckIn = dateStr <= getTodayDateString();
+  const status = !activeHabits.length
+    ? "No active habits"
+    : completedCount === activeHabits.length
+    ? "All habits complete"
+    : completedCount > 0
+    ? "Partially complete"
+    : dateStr < getTodayDateString()
+    ? "No habits completed"
+    : "Habits still open";
+
+  return `
+    <section class="card calendar-day-details" aria-labelledby="calendar-day-title">
+      <div class="calendar-day-details__header">
+        <div>
+          <p class="dashboard-section__eyebrow">DAILY REVIEW</p>
+          <h3 id="calendar-day-title">${escapeHTML(label)}</h3>
+          <p class="text-muted">${escapeHTML(status)}</p>
+        </div>
+        ${calendarViewMode === "day" ? `
+          <div class="calendar-day-details__controls">
+            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
+            <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
+            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="1" aria-label="Next day" ${dateStr >= getTodayDateString() ? "disabled" : ""}>›</button>
+          </div>
+        ` : ""}
+      </div>
+      <div class="calendar-day-details__stats">
+        <div><strong>${completedCount}/${activeHabits.length}</strong><span>habits</span></div>
+        <div><strong>${completionPercent}%</strong><span>completion</span></div>
+        <div><strong>${habitXp + challengeXp}</strong><span>XP earned</span></div>
+        <div><strong>${bestStreak.current}</strong><span>day streak</span></div>
+      </div>
+      <div class="calendar-streak-strip" aria-label="Seven-day habit activity">
+        ${recentDates.map((recentDate) => {
+          const hasActivity = getHabitCompletionsForDate(recentDate, state, true).length > 0;
+          const day = new Date(`${recentDate}T00:00:00`);
+          return `<span class="${hasActivity ? "is-complete" : recentDate < getTodayDateString() ? "is-missed" : ""}" title="${escapeHTML(recentDate)}">${CALENDAR_WEEKDAY_LABELS[day.getDay()].slice(0, 1)}</span>`;
+        }).join("")}
+        <small>7-day rhythm</small>
+      </div>
+      <div class="calendar-day-details__habits">
+        <h4>Habits</h4>
+        ${eligibleHabits.length ? eligibleHabits.map((habit) => `
+          <div class="calendar-day-habit ${completedIds.has(habit.id) ? "is-complete" : ""}">
+            ${!habit.archived && canCheckIn ? renderHabitCheckButton(habit, dateStr) : `<span class="calendar-day-habit__mark">${completedIds.has(habit.id) ? "✓" : "·"}</span>`}
+            <span class="calendar-day-habit__info">
+              <span class="calendar-day-habit__title">${escapeHTML(habit.title)}</span>
+              ${habit.description ? `<small>${escapeHTML(habit.description)}</small>` : ""}
+              <span class="difficulty-tag difficulty-${escapeHTML(habit.difficulty || "medium")}">${escapeHTML(getDifficultyConfig(habit.difficulty || "medium").label)}</span>
+            </span>
+            <strong>${completedIds.has(habit.id)
+              ? `+${(state.habitXpLedger || []).find((entry) => entry.habitId === habit.id && entry.date === dateStr)?.amount || 0} XP`
+              : `+${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP`}</strong>
+          </div>
+        `).join("") : `<p class="text-muted">No habits were set up by this date.</p>`}
+      </div>
+      ${challenges.completed.length ? `
+        <div class="calendar-day-details__challenges">
+          <h4>Challenges completed (${challenges.completed.length})</h4>
+          ${challenges.completed.map((challenge) => renderDayDetailRow(challenge, true)).join("")}
+        </div>
+      ` : ""}
+      ${challenges.active.length ? `
+        <div class="calendar-day-details__challenges">
+          <h4>Scheduled challenges (${challenges.active.length})</h4>
+          ${challenges.active.map((challenge) => renderDayDetailRow(challenge, false)).join("")}
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
 
 function renderCalendarGrid() {
   const year = calendarViewDate.getFullYear();
@@ -2821,17 +3313,24 @@ function renderCalendarGrid() {
         "calendar-day",
         !cell.inMonth ? "is-outside-month" : "",
         cell.isToday ? "is-today" : "",
+        cell.dateStr === calendarSelectedDate ? "is-selected" : "",
+        cell.habitStatus ? `habit-status-${cell.habitStatus}` : "",
         intensity > 0 ? `intensity-${intensity}` : "",
       ]
         .filter(Boolean)
         .join(" ");
 
-      const activityLabel = cell.count === 1 ? "activity" : "activities";
-      const label = `${CALENDAR_MONTH_NAMES[month]} ${cell.day}, ${year}: ${cell.count} ${activityLabel}`;
-      const title = cell.count > 0 ? ` title="${cell.count} ${activityLabel}"` : "";
+      const habitSummary = cell.habitStatus === "upcoming"
+        ? "—"
+        : `${cell.habitCount}/${cell.habitTotal}`;
+      const habitLabel = cell.habitStatus === "upcoming"
+        ? "future date"
+        : `${cell.habitCount} of ${cell.habitTotal} habits completed`;
+      const label = `${CALENDAR_MONTH_NAMES[month]} ${cell.day}, ${year}: ${habitLabel}, ${cell.challengeCount} challenges completed, ${cell.xp} XP earned`;
+      const title = `${habitLabel} · ${cell.challengeCount} challenges · ${cell.xp} XP`;
 
       return cell.inMonth
-        ? `<button type="button" class="${classes}" data-calendar-date="${cell.dateStr}" aria-label="${label}"${title}>${cell.day}</button>`
+        ? `<button type="button" class="${classes}" data-calendar-date="${cell.dateStr}" aria-pressed="${cell.dateStr === calendarSelectedDate}" aria-label="${escapeHTML(label)}" title="${escapeHTML(title)}"><span class="calendar-day__number">${cell.day}</span><span class="calendar-day__summary">${habitSummary}${cell.habitStatus === "upcoming" ? "" : `<span class="calendar-day__summary-label"> habits</span>`}</span>${cell.challengeCount > 0 ? `<span class="calendar-day__challenges">${cell.challengeCount} win${cell.challengeCount === 1 ? "" : "s"}</span>` : ""}${cell.xp > 0 ? `<span class="calendar-day__xp">+${cell.xp} XP</span>` : ""}${cell.count ? `<i aria-hidden="true"></i>` : ""}</button>`
         : `<div class="${classes}" aria-hidden="true">${cell.day}</div>`;
     })
     .join("");
@@ -2841,18 +3340,48 @@ function renderCalendarGrid() {
       <button class="calendar-nav-btn" id="calendar-prev-btn" aria-label="Previous month">‹</button>
       <span class="calendar-month-label">${CALENDAR_MONTH_NAMES[month]} ${year}</span>
       <button class="calendar-nav-btn" id="calendar-next-btn" aria-label="Next month">›</button>
+      <button class="btn-secondary btn-sm" type="button" id="calendar-today-btn">Today</button>
     </div>
     <div class="calendar-weekday-row">${weekdayRow}</div>
     <div class="calendar-grid">${dayCells}</div>
     <div class="calendar-legend">
-      <span>Less</span>
-      <span class="calendar-legend-swatch"></span>
-      <span class="calendar-legend-swatch intensity-1"></span>
-      <span class="calendar-legend-swatch intensity-2"></span>
-      <span class="calendar-legend-swatch intensity-3"></span>
-      <span class="calendar-legend-swatch intensity-4"></span>
-      <span>More</span>
+      <span><i class="calendar-legend-dot is-complete"></i> All habits</span>
+      <span><i class="calendar-legend-dot is-partial"></i> Some habits</span>
+      <span><i class="calendar-legend-dot is-missed"></i> No check-ins</span>
     </div>
+  `;
+}
+
+function renderCalendarMonthInsights() {
+  const year = calendarViewDate.getFullYear();
+  const month = calendarViewDate.getMonth();
+  const summary = getCalendarMonthSummary(year, month);
+  const bestDayLabel = summary.bestDay
+    ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" })
+      .format(new Date(`${summary.bestDay.date}T00:00:00`))
+    : "No activity yet";
+
+  return `
+    <section class="card calendar-month-insights" aria-label="${CALENDAR_MONTH_NAMES[month]} activity summary">
+      <div class="calendar-month-insights__heading">
+        <div>
+          <p class="dashboard-section__eyebrow">MONTH AT A GLANCE</p>
+          <h3>${CALENDAR_MONTH_NAMES[month]} ${year}</h3>
+        </div>
+        <p class="text-muted">${summary.hasTrackedDates ? `${summary.daysWithActivity} active day${summary.daysWithActivity === 1 ? "" : "s"}` : "No tracked days yet"}</p>
+      </div>
+      <div class="calendar-month-insights__stats">
+        <div><strong>${summary.habitCheckIns}</strong><span>habit check-ins</span></div>
+        <div><strong>${summary.challengeWins}</strong><span>challenges completed</span></div>
+        <div><strong>${summary.xpEarned}</strong><span>XP earned</span></div>
+        <div><strong>${summary.completionRate === null ? "—" : `${summary.completionRate}%`}</strong><span>habit completion</span></div>
+      </div>
+      <p class="calendar-month-insights__best text-muted">
+        ${summary.bestDay
+          ? `Most active day: <strong>${bestDayLabel}</strong> with ${summary.bestDay.count} completed item${summary.bestDay.count === 1 ? "" : "s"}. Longest activity run: ${summary.bestRun} consecutive day${summary.bestRun === 1 ? "" : "s"}.`
+          : "Complete a habit or challenge to start building your monthly activity history."}
+      </p>
+    </section>
   `;
 }
 
@@ -2888,10 +3417,15 @@ function renderWeekDayCard(day) {
   const isEmpty = day.active.length === 0 && day.completed.length === 0;
 
   return `
-    <div class="week-day-card ${day.isToday ? "is-today" : ""}" data-date="${day.dateStr}">
+    <div class="week-day-card ${day.isToday ? "is-today" : ""} ${day.dateStr === calendarSelectedDate ? "is-selected" : ""}" data-date="${day.dateStr}" role="button" tabindex="0" aria-pressed="${day.dateStr === calendarSelectedDate}" aria-label="${day.dayLabel}, ${day.monthLabel} ${day.dayNumber}: ${day.habits.length} of ${day.habitTotal} habits, ${day.completed.length} challenges, ${day.xp} XP">
       <div class="week-day-header">
         <span class="week-day-label">${day.dayLabel}</span>
         <span class="week-day-number">${day.dayNumber}</span>
+      </div>
+      <div class="week-day-summary">
+        <span>${day.habits.length}/${day.habitTotal} habits</span>
+        <span>${day.completed.length} wins</span>
+        <strong>${day.xp} XP</strong>
       </div>
       <div class="week-day-chips">
         ${day.habits.length ? `<span class="week-habit-count" aria-label="${day.habits.length} habits completed">${day.habits.length} habit${day.habits.length === 1 ? "" : "s"}</span>` : ""}
@@ -2914,11 +3448,12 @@ function renderWeeklyView() {
         <button class="calendar-nav-btn" id="week-prev-btn" aria-label="Previous week">‹</button>
         <span class="calendar-month-label">${first.monthLabel} ${first.dayNumber} – ${last.monthLabel} ${last.dayNumber}</span>
         <button class="calendar-nav-btn" id="week-next-btn" aria-label="Next week">›</button>
+        <button class="btn-secondary btn-sm" type="button" id="calendar-today-btn">Today</button>
       </div>
       <div class="week-grid" id="week-grid">
         ${days.map(renderWeekDayCard).join("")}
       </div>
-      <p class="week-view-hint text-muted">Tap a scheduled task to complete it, or a day to review challenges and habits.</p>
+      <p class="week-view-hint text-muted">Select a day to review its habits, XP, streak, and completed challenges.</p>
     </div>
   `;
 }
@@ -2950,12 +3485,13 @@ function renderHabitCheckButton(habit, dateStr) {
 
 function renderHabitDailyRow(habit, dateStr) {
   const isComplete = Array.isArray(habit.completedDates) && habit.completedDates.includes(dateStr);
-  const hasEarnedXp = Array.isArray(habit.xpAwardedDates) && habit.xpAwardedDates.includes(dateStr);
+  const xpEntry = (state.habitXpLedger || []).find((entry) => entry.habitId === habit.id && entry.date === dateStr);
+  const reward = CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium;
   return `
     <div class="habit-daily-row ${isComplete ? "is-complete" : ""}">
       ${renderHabitCheckButton(habit, dateStr)}
       <span class="habit-daily-row__title">${escapeHTML(habit.title)}</span>
-      <span class="habit-daily-row__xp">${hasEarnedXp ? `+${CONFIG.HABIT_COMPLETION_XP} XP earned` : `+${CONFIG.HABIT_COMPLETION_XP} XP`}</span>
+      <span class="habit-daily-row__xp">${xpEntry ? `+${xpEntry.amount} XP earned` : `+${reward} XP`}</span>
     </div>
   `;
 }
@@ -2965,10 +3501,7 @@ function renderTodayHabitsCard() {
   const { completed, active } = getDayDetail(todayStr);
   const habits = getActiveHabits();
   const completedHabits = getHabitCompletionsForDate(todayStr);
-  const totalXp = completed.reduce((sum, c) => sum + c.xpValue, 0) +
-    completedHabits.filter((habit) =>
-      Array.isArray(habit.xpAwardedDates) && habit.xpAwardedDates.includes(todayStr)
-    ).length * CONFIG.HABIT_COMPLETION_XP;
+  const totalXp = completed.reduce((sum, c) => sum + c.xpValue, 0) + getHabitXpForDate(todayStr);
   const goalProgress = getDailyGoalProgress();
 
   const taskListHTML =
@@ -3074,9 +3607,7 @@ function renderDayDetailModal() {
   if (!dayDetailDate) return "";
 
   const { completed, active, habits } = getDayDetail(dayDetailDate);
-  const habitXp = habits.filter((habit) =>
-    Array.isArray(habit.xpAwardedDates) && habit.xpAwardedDates.includes(dayDetailDate)
-  ).length * CONFIG.HABIT_COMPLETION_XP;
+  const habitXp = getHabitXpForDate(dayDetailDate);
   const challengeXp = completed.reduce((sum, c) => sum + c.xpValue, 0);
   const totalXp = challengeXp + habitXp;
   const d = new Date(`${dayDetailDate}T00:00:00`);
@@ -3099,12 +3630,15 @@ function renderDayDetailModal() {
                   ? `
                     <div class="day-detail-section">
                       <h4>Habits completed (${habits.length}) · ${habitXp} XP</h4>
-                      ${habits.map((habit) => `
-                        <div class="day-detail-row">
-                          <span class="day-detail-row__title">✓ ${escapeHTML(habit.title)}</span>
-                          <span class="day-detail-row__xp">+${CONFIG.HABIT_COMPLETION_XP} XP</span>
-                        </div>
-                      `).join("")}
+                      ${habits.map((habit) => {
+                        const entry = (state.habitXpLedger || []).find((item) => item.habitId === habit.id && item.date === dayDetailDate);
+                        return `
+                          <div class="day-detail-row">
+                            <span class="day-detail-row__title">✓ ${escapeHTML(habit.title)}</span>
+                            <span class="day-detail-row__xp">${entry ? `+${entry.amount} XP` : "XP already awarded"}</span>
+                          </div>
+                        `;
+                      }).join("")}
                     </div>
                   `
                   : ""
@@ -3151,6 +3685,45 @@ function renderHabitTracker() {
   const progress = possibleCheckIns ? Math.round((checkedThisWeek / possibleCheckIns) * 100) : 0;
   const firstDay = days[0];
   const lastDay = days[6];
+  const analytics = getHabitAnalytics(habitAnalyticsPeriod);
+  const difficultyOptions = (selected) => Object.entries(CONFIG.HABIT_XP_REWARDS)
+    .map(([difficulty, reward]) => `<option value="${difficulty}" ${selected === difficulty ? "selected" : ""}>${difficulty[0].toUpperCase()}${difficulty.slice(1)} · ${reward} XP</option>`)
+    .join("");
+  const renderHabitManagerRow = (habit) => {
+    const stats = getHabitCompletionRate([habit], habit.createdDate || (habit.createdAt || "").slice(0, 10), getTodayDateString());
+    const streak = getHabitStreakStats(habit);
+    const isEditing = editingHabitId === habit.id;
+    return `
+      <article class="habit-manager-row ${habit.archived ? "is-archived" : ""}" data-habit-card="${escapeHTML(habit.id)}">
+        <div class="habit-manager-row__details">
+          <div class="habit-manager-row__heading">
+            <span class="habit-manager-row__icon" aria-hidden="true">✦</span>
+            <strong class="habit-manager-row__title">${escapeHTML(habit.title)}</strong>
+            <span class="difficulty-tag difficulty-${habit.difficulty || "medium"}">${(habit.difficulty || "medium")[0].toUpperCase()}${(habit.difficulty || "medium").slice(1)}</span>
+          </div>
+          ${habit.description ? `<p class="habit-manager-row__description text-muted">${escapeHTML(habit.description)}</p>` : ""}
+          <div class="habit-manager-row__meta">${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP per first check-in · ${stats.completed} successful check-ins · ${stats.percent}% overall · ${streak.current} day streak · ${streak.longest} best</div>
+        </div>
+        <div class="habit-manager-row__actions">
+          <button type="button" class="btn-secondary btn-sm" data-habit-edit="${escapeHTML(habit.id)}">${isEditing ? "Close" : "Edit"}</button>
+          ${habit.archived
+            ? `<button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Restore ${escapeHTML(habit.title)}">Restore</button>`
+            : `<button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Archive ${escapeHTML(habit.title)}">Archive</button>`}
+          <button type="button" class="btn-danger btn-sm" data-habit-delete="${escapeHTML(habit.id)}">Delete</button>
+        </div>
+        ${isEditing ? `
+          <form class="habit-edit-form" data-habit-edit-form="${escapeHTML(habit.id)}">
+            <label>Habit name<input name="title" value="${escapeHTML(habit.title)}" maxlength="50" required></label>
+            <label>Description<input name="description" value="${escapeHTML(habit.description || "")}" maxlength="180" placeholder="What does this habit mean to you?"></label>
+            <label>Difficulty<select name="difficulty">${difficultyOptions(habit.difficulty || "medium")}</select></label>
+            <p class="error-text" data-habit-edit-error></p>
+            <button type="submit" class="btn btn-sm">Save changes</button>
+          </form>
+        ` : ""}
+      </article>
+    `;
+  };
+  const analyticsTitle = { day: "Daily performance", week: "Weekly performance", month: "Monthly performance" }[habitAnalyticsPeriod];
 
   return `
     <section class="view-heading">
@@ -3164,15 +3737,64 @@ function renderHabitTracker() {
     <section class="habit-overview-grid" aria-label="Habit progress">
       <div class="card habit-overview-card">
         <span class="habit-overview-card__icon" aria-hidden="true">🌿</span>
-        <div><strong>${habits.length}</strong><span>active habits</span></div>
+        <div><strong>${analytics.totalCount}</strong><span>total habits · ${habits.length} active</span></div>
       </div>
       <div class="card habit-overview-card">
         <span class="habit-overview-card__icon" aria-hidden="true">✅</span>
-        <div><strong>${checkedThisWeek}/${possibleCheckIns}</strong><span>check-ins this week</span></div>
+        <div><strong>${analytics.completedHabitCount}</strong><span>habits completed this ${habitAnalyticsPeriod === "day" ? "day" : habitAnalyticsPeriod}</span></div>
       </div>
       <div class="card habit-overview-card">
         <span class="habit-overview-card__icon" aria-hidden="true">🔥</span>
-        <div><strong>${getLongestHabitStreak()}</strong><span>best habit streak</span></div>
+        <div><strong>${analytics.currentStreak} / ${analytics.bestStreak}</strong><span>current / best streak</span></div>
+      </div>
+      <div class="card habit-overview-card">
+        <span class="habit-overview-card__icon" aria-hidden="true">◷</span>
+        <div><strong>${analytics.overallPercent}%</strong><span>overall completion</span></div>
+      </div>
+    </section>
+
+    <section class="card habit-analytics-card" aria-labelledby="habit-analytics-title">
+      <div class="habit-analytics-heading">
+        <div>
+          <p class="dashboard-section__eyebrow">YOUR CONSISTENCY, MEASURED</p>
+          <h3 id="habit-analytics-title">${analyticsTitle}</h3>
+        </div>
+        <div class="habit-analytics-tabs" role="group" aria-label="Habit analytics period">
+          ${[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]].map(([period, label]) => `
+            <button type="button" data-habit-period="${period}" class="${habitAnalyticsPeriod === period ? "is-active" : ""}" aria-pressed="${habitAnalyticsPeriod === period}">${label}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div class="habit-analytics-summary">
+        <div><strong>${analytics.percent}%</strong><span>${analytics.completed} / ${analytics.expected} check-ins</span></div>
+        ${habitAnalyticsPeriod === "day" ? `
+          <p>${analytics.todayCompleted} completed · ${analytics.todayRemaining} remaining today</p>
+          <div class="habit-progress-track" role="progressbar" aria-label="Today's habit completion" aria-valuenow="${analytics.percent}" aria-valuemin="0" aria-valuemax="100"><span style="width:${analytics.percent}%"></span></div>
+        ` : ""}
+        ${habitAnalyticsPeriod === "month" ? `
+          <p>${analytics.bestPerformingDay ? `Best day: ${analytics.bestPerformingDay.label} (${analytics.bestPerformingDay.percent}%)` : "No habit activity yet this month."} · ${analytics.monthlyDelta === null ? "No comparable activity last month." : `${analytics.monthlyDelta >= 0 ? "+" : ""}${analytics.monthlyDelta}% vs last month to date`}</p>
+        ` : ""}
+      </div>
+      ${analytics.dailyPoints.length ? `
+        <div class="habit-analytics-chart" role="img" aria-label="${analyticsTitle} completion chart">
+          ${analytics.dailyPoints.map((point) => `
+            <div class="habit-analytics-chart__column" title="${point.label}: ${point.percent}%">
+              <span class="habit-analytics-chart__value">${point.percent}%</span>
+              <div class="habit-analytics-chart__track"><span style="height:${point.percent}%"></span></div>
+              <span class="habit-analytics-chart__label">${escapeHTML(point.label)}</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<p class="text-muted">Add a habit to start building an analytics history.</p>`}
+      <div class="habit-analytics-lists">
+        <div>
+          <h4>Most consistent</h4>
+          ${analytics.consistentHabits.length ? analytics.consistentHabits.map(({ habit, percent }) => `<p>${escapeHTML(habit.title)} <strong>${percent}%</strong></p>`).join("") : `<p class="text-muted">No check-ins yet.</p>`}
+        </div>
+        <div>
+          <h4>Missed habits</h4>
+          ${analytics.missedHabits.length ? analytics.missedHabits.slice(0, 4).map((habit) => `<p>${escapeHTML(habit.title)}</p>`).join("") : `<p class="text-muted">No missed habits in this period.</p>`}
+        </div>
       </div>
     </section>
 
@@ -3180,36 +3802,27 @@ function renderHabitTracker() {
       <div class="habit-card-heading">
         <div>
           <h3 id="habit-manager-title">Your daily habits</h3>
-          <p class="text-muted">Set the habits you want to show up for every day.</p>
+          <p class="text-muted">Edit names, descriptions, and difficulty without losing check-in history. A check-in earns XP once per habit per date.</p>
         </div>
       </div>
       <form id="add-habit-form" class="add-habit-form" novalidate>
         <label class="sr-only" for="add-habit-input">New daily habit</label>
-        <input id="add-habit-input" type="text" maxlength="50" placeholder="e.g. Read for 10 minutes" autocomplete="off" required>
+        <input id="add-habit-input" name="title" type="text" maxlength="50" placeholder="e.g. Read for 10 minutes" autocomplete="off" required>
+        <label class="sr-only" for="add-habit-description">Habit description</label>
+        <input id="add-habit-description" name="description" type="text" maxlength="180" placeholder="Description (optional)">
+        <label class="sr-only" for="add-habit-difficulty">Habit difficulty</label>
+        <select id="add-habit-difficulty" name="difficulty">${difficultyOptions("medium")}</select>
         <button class="btn" type="submit">Add habit</button>
       </form>
       <p class="error-text" id="add-habit-error" role="status"></p>
       <div class="habit-manager-list">
-        ${habits.length ? habits.map((habit) => `
-          <div class="habit-manager-row">
-            <span class="habit-manager-row__icon" aria-hidden="true">✦</span>
-            <span class="habit-manager-row__title">${escapeHTML(habit.title)}</span>
-            <span class="habit-manager-row__meta">${CONFIG.HABIT_COMPLETION_XP} XP / day</span>
-            <button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Archive ${escapeHTML(habit.title)}">Archive</button>
-          </div>
-        `).join("") : `<p class="habit-empty-note text-muted">Your list is empty. Add your first small daily habit above.</p>`}
+        ${habits.length ? habits.map(renderHabitManagerRow).join("") : `<p class="habit-empty-note text-muted">Your list is empty. Add your first small daily habit above.</p>`}
       </div>
       ${archivedHabits.length ? `
         <details class="habit-archived">
           <summary>Archived habits (${archivedHabits.length})</summary>
           <div class="habit-manager-list">
-            ${archivedHabits.map((habit) => `
-              <div class="habit-manager-row is-archived">
-                <span class="habit-manager-row__icon" aria-hidden="true">✦</span>
-                <span class="habit-manager-row__title">${escapeHTML(habit.title)}</span>
-                <button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Restore ${escapeHTML(habit.title)}">Restore</button>
-              </div>
-            `).join("")}
+            ${archivedHabits.map(renderHabitManagerRow).join("")}
           </div>
         </details>
       ` : ""}
@@ -3266,6 +3879,18 @@ function renderHabitTracker() {
         </div>
       `}
     </section>
+    ${confirmingHabitDeleteId ? `
+      <div class="modal-overlay habit-delete-overlay">
+        <section class="modal-card card" role="alertdialog" aria-modal="true" aria-labelledby="habit-delete-title">
+          <h3 id="habit-delete-title">Delete this habit?</h3>
+          <p class="text-muted">This permanently removes the habit and its check-in history. Previously earned XP and levels will not be taken away.</p>
+          <div class="habit-delete-actions">
+            <button type="button" class="btn-secondary" data-habit-delete-cancel>Keep habit</button>
+            <button type="button" class="btn-danger" data-habit-delete-confirm>Delete habit</button>
+          </div>
+        </section>
+      </div>
+    ` : ""}
   `;
 }
 
@@ -3325,7 +3950,7 @@ function renderLockInPanel() {
         <div class="lockin-focus-controls">
           <div class="lockin-focus-controls__copy">
             <strong>Quiet focus</strong>
-            <span class="text-muted">Mute Questify alerts and reminders only; your device's other alerts are not controlled here.</span>
+            <span class="text-muted">Mute Questify toasts, its notification log, and browser reminders. Other apps and OS alerts are unchanged.</span>
           </div>
           <div
             id="lockin-notifications-switch"
@@ -3336,6 +3961,10 @@ function renderLockInPanel() {
             tabindex="0"
           ><div class="theme-switch__knob"></div></div>
         </div>
+        <details class="focus-os-guidance">
+          <summary>Silence notifications from other apps</summary>
+          <p>Questify cannot change phone-wide settings. Android: open Quick Settings and enable Do Not Disturb/Focus. iPhone: open Control Center, tap Focus, and choose a mode.</p>
+        </details>
         <div class="lockin-panel__actions lockin-panel__actions--secondary">
           <button id="lockin-pause-btn" class="btn-secondary btn-sm" data-id="${active.id}">
             ${active.isPaused ? "Resume" : "Pause"}
@@ -3356,7 +3985,7 @@ function renderLockInPanel() {
         <span class="lockin-panel__badge">🔒 Lock In</span>
       </div>
       <p class="text-muted lockin-panel__description">
-        Choose a focus block. Questify will let you know when time is up, and you can keep going if you need to.
+        Choose your focus duration and whether Questify should hold its own alerts. Your selected duration is remembered.
       </p>
       <form id="lockin-start-form" class="lockin-start-form" novalidate>
         <label for="lockin-title-input" class="sr-only">Session title</label>
@@ -3385,9 +4014,9 @@ function renderLockInPanel() {
               (mins) => `
                 <button
                   type="button"
-                  class="lockin-duration-option ${mins === 60 ? "is-selected" : ""}"
+                  class="lockin-duration-option ${mins === (state.preferences.lastLockInDuration || 60) ? "is-selected" : ""}"
                   data-duration="${mins}"
-                  aria-pressed="${mins === 60}"
+                  aria-pressed="${mins === (state.preferences.lastLockInDuration || 60)}"
                 >${mins} min</button>
               `
             ).join("")}
@@ -3398,16 +4027,27 @@ function renderLockInPanel() {
               aria-pressed="false"
             >Custom</button>
           </div>
-          <input type="hidden" id="lockin-duration-select" value="60" />
+          <input type="hidden" id="lockin-duration-select" value="${[15, 25, 45, 60, 90].includes(state.preferences.lastLockInDuration) ? state.preferences.lastLockInDuration : "custom"}" />
           <label for="lockin-custom-minutes-input" class="sr-only">Custom duration in minutes</label>
           <input
             type="number"
             id="lockin-custom-minutes-input"
-            class="lockin-custom-input is-hidden"
+            class="lockin-custom-input ${[15, 25, 45, 60, 90].includes(state.preferences.lastLockInDuration) ? "is-hidden" : ""}"
             placeholder="Enter minutes (1–240)"
             min="1"
             max="240"
+            value="${[15, 25, 45, 60, 90].includes(state.preferences.lastLockInDuration) ? "" : Math.min(240, Math.max(1, Number(state.preferences.lastLockInDuration) || 60))}"
           />
+        </div>
+        <div class="lockin-start-quiet">
+          <label for="lockin-start-quiet-input">
+            <input id="lockin-start-quiet-input" type="checkbox" ${state.preferences.blockNotificationsDuringLockIn ? "checked" : ""}>
+            <span><strong>Mute Questify notifications</strong><small>Suppresses Questify toasts, its notification log, and browser reminders for this session only.</small></span>
+          </label>
+          <details class="focus-os-guidance">
+            <summary>Silence notifications from other apps</summary>
+            <p>Questify is a web app and cannot change phone-wide notification settings. Use your device's native mode: Android — open Quick Settings and turn on Do Not Disturb/Focus; iPhone — open Control Center, tap Focus, and choose a mode.</p>
+          </details>
         </div>
         <button type="submit" class="btn lockin-start-form__submit">Start focus session</button>
       </form>
@@ -3487,34 +4127,205 @@ function renderChallengeCard(challenge) {
 // -------------------------------------
 // Onboarding tour: slide content (data as config, same pattern as BADGES)
 // -------------------------------------
-const TOUR_SLIDES = [
+const TOUR_STEPS = [
   {
-    icon: "🎯",
-    title: "Create daily challenges",
-    body: "Add small goals for yourself - easy, medium, or hard - and pick when they're due. Make them repeat daily or weekly if it's a habit.",
+    view: "dashboard",
+    selector: ".dashboard-hero",
+    title: "Your day, at a glance",
+    body: "The dashboard brings today's progress, priorities, and momentum together. Start here to decide on your next small win.",
   },
   {
-    icon: "🔥",
-    title: "Build your streak",
-    body: "Show up for a habit or challenge each day to build your streak, earn XP, and level up. Every small win counts.",
+    view: "dashboard",
+    selector: ".dashboard-level-chip",
+    title: "Progress that builds",
+    body: "Challenges and habit check-ins earn XP. Your level and progress are always visible here.",
   },
   {
-    icon: "🏆",
-    title: "Unlock badges",
-    body: "Dozens of badges are waiting to be earned - for milestones, streaks, and more. Check your progress anytime in Badges and Stats.",
+    view: "habits",
+    selector: ".habit-manager-card",
+    title: "Make habits measurable",
+    body: "Create daily habits, choose their difficulty, and check in once per day. Editing keeps your history.",
+  },
+  {
+    view: "habits",
+    selector: ".habit-analytics-card",
+    title: "See your consistency",
+    body: "Daily, weekly, and monthly views summarize real check-ins, streaks, and missed habits.",
+  },
+  {
+    view: "calendar",
+    selector: ".calendar-view-heading",
+    title: "Review your history",
+    body: "The calendar brings habit activity, challenge completions, streaks, and earned XP into one timeline.",
+  },
+  {
+    view: "badges",
+    selector: ".badge-progress-summary",
+    title: "Celebrate milestones",
+    body: "Badges recognize progress and consistency. Your earned badges and next milestones live here.",
+  },
+  {
+    view: "challenges",
+    selector: ".lockin-panel",
+    title: "Choose a focus block",
+    body: "Locked-In sessions offer a timer and optional suppression of Questify's own notifications. System-wide silence must be enabled in your device's Focus or Do Not Disturb settings.",
   },
 ];
 
-function finishTour() {
+function startProductTour() {
+  tourStep = 0;
+  isTourActive = true;
+  tourTargetView = TOUR_STEPS[tourStep].view;
+  navigateTo(tourTargetView);
+}
+
+function finishTour(completed = false) {
   state.user.hasSeenTour = true;
+  if (completed) {
+    state.user.hasCompletedTour = true;
+    checkBadges({ skipSave: true });
+  }
   saveState();
+  isTourActive = false;
+  clearTourPositioning();
   navigateTo("dashboard");
+}
+
+function renderTourOverlay() {
+  const step = TOUR_STEPS[tourStep];
+  if (!step) return "";
+  const last = tourStep === TOUR_STEPS.length - 1;
+  return `
+    <div class="onboarding-tour-overlay" aria-hidden="true"></div>
+    <section class="onboarding-tour-bubble card" id="onboarding-tour-bubble" role="dialog" aria-modal="false" aria-labelledby="tour-title" aria-describedby="tour-description">
+      <div class="onboarding-tour-bubble__topline">
+        <span>QUESTIFY QUICK TOUR</span>
+        <span>${tourStep + 1} of ${TOUR_STEPS.length}</span>
+      </div>
+      <h2 id="tour-title">${escapeHTML(step.title)}</h2>
+      <p id="tour-description">${escapeHTML(step.body)}</p>
+      <div class="onboarding-tour-progress" role="progressbar" aria-label="Tour progress" aria-valuenow="${tourStep + 1}" aria-valuemin="1" aria-valuemax="${TOUR_STEPS.length}">
+        <span style="width:${((tourStep + 1) / TOUR_STEPS.length) * 100}%"></span>
+      </div>
+      <div class="onboarding-tour-actions">
+        <button type="button" class="btn-secondary btn-sm" id="tour-skip-btn">Skip tour</button>
+        <div>
+          <button type="button" class="btn-secondary btn-sm" id="tour-previous-btn" ${tourStep === 0 ? "disabled" : ""}>Previous</button>
+          <button type="button" class="btn btn-sm" id="tour-next-btn">${last ? "Finish tour" : "Next"}</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function positionTourOverlay() {
+  const step = TOUR_STEPS[tourStep];
+  const target = step && document.querySelector(step.selector);
+  const bubble = document.getElementById("onboarding-tour-bubble");
+  if (!target || !bubble) return;
+  target.classList.add("tour-highlight");
+  if (target.closest("#app-header")) {
+    document.getElementById("app-header").classList.add("is-tour-target");
+  }
+  const rect = target.getBoundingClientRect();
+  const margin = 16;
+  bubble.style.maxHeight = `${Math.max(0, window.innerHeight - margin * 2)}px`;
+  const bubbleRect = bubble.getBoundingClientRect();
+  const maxLeft = Math.max(margin, window.innerWidth - bubbleRect.width - margin);
+  const left = Math.min(maxLeft, Math.max(
+    margin,
+    rect.left + rect.width / 2 - bubbleRect.width / 2
+  ));
+  const belowTop = rect.bottom + 14;
+  const aboveTop = rect.top - bubbleRect.height - 14;
+  const preferredTop = belowTop + bubbleRect.height <= window.innerHeight - margin
+    ? belowTop
+    : aboveTop >= margin
+      ? aboveTop
+      : rect.top + rect.height / 2 - bubbleRect.height / 2;
+  const maxTop = Math.max(margin, window.innerHeight - bubbleRect.height - margin);
+  const top = Math.min(maxTop, Math.max(margin, preferredTop));
+  bubble.style.left = `${left}px`;
+  bubble.style.top = `${top}px`;
+}
+
+function clearTourPositioning() {
+  window.removeEventListener("scroll", positionTourOverlay);
+  window.removeEventListener("resize", positionTourOverlay);
+  document.querySelectorAll(".tour-highlight").forEach((target) => {
+    target.classList.remove("tour-highlight");
+  });
+  document.getElementById("app-header")?.classList.remove("is-tour-target");
+}
+
+function attachTourHandlers() {
+  const step = TOUR_STEPS[tourStep];
+  if (!step) return;
+  const target = document.querySelector(step.selector);
+  window.addEventListener("scroll", positionTourOverlay, { passive: true });
+  window.addEventListener("resize", positionTourOverlay);
+  if (target && !target.getClientRects().length && window.matchMedia("(max-width: 767px)").matches) {
+    document.querySelector(".app-nav")?.classList.add("is-more-open");
+    document.getElementById("nav-more-toggle")?.setAttribute("aria-expanded", "true");
+  }
+  target?.scrollIntoView({
+    block: "nearest",
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+  });
+  positionTourOverlay();
+  document.getElementById("tour-next-btn")?.addEventListener("click", () => {
+    if (tourStep === TOUR_STEPS.length - 1) {
+      finishTour(true);
+      return;
+    }
+    tourStep += 1;
+    tourTargetView = TOUR_STEPS[tourStep].view;
+    navigateTo(tourTargetView, false);
+  });
+  document.getElementById("tour-previous-btn")?.addEventListener("click", () => {
+    if (tourStep === 0) return;
+    tourStep -= 1;
+    tourTargetView = TOUR_STEPS[tourStep].view;
+    navigateTo(tourTargetView, false);
+  });
+  document.getElementById("tour-skip-btn")?.addEventListener("click", () => finishTour(false));
+  document.getElementById("tour-next-btn")?.focus();
+}
+
+function isCurrentPolicyAccepted() {
+  return state.legalAcceptance?.policyVersion === LEGAL_POLICY_VERSION &&
+    Boolean(state.legalAcceptance.acceptedAt);
 }
 
 // -------------------------------------
 // View registry
 // -------------------------------------
 const views = {
+  consent: () => `
+    <section class="consent-screen" aria-labelledby="consent-title">
+      <div class="consent-card card">
+        <img src="logo.svg" alt="Questify" class="consent-logo" width="64" height="64">
+        <p class="dashboard-section__eyebrow">WELCOME TO QUESTIFY</p>
+        <h1 id="consent-title">A thoughtful start</h1>
+        <p class="text-muted">Before continuing, please review how Questify works and the terms for using this app. Your progress stays on this device.</p>
+        <div class="consent-document-links">
+          <a class="consent-document-link" href="privacy.html" target="_blank" rel="noopener">
+            <span><strong>Privacy Policy</strong><small>Local data, notifications, and your choices</small></span><span aria-hidden="true">↗</span>
+          </a>
+          <a class="consent-document-link" href="terms.html" target="_blank" rel="noopener">
+            <span><strong>Terms of Service</strong><small>What Questify does and what to expect</small></span><span aria-hidden="true">↗</span>
+          </a>
+        </div>
+        <form id="consent-form">
+          <label class="consent-check"><input type="checkbox" name="privacy" required><span>I have read and agree to the <a href="privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.</span></label>
+          <label class="consent-check"><input type="checkbox" name="terms" required><span>I have read and agree to the <a href="terms.html" target="_blank" rel="noopener">Terms of Service</a>.</span></label>
+          <p class="error-text" id="consent-error" role="status"></p>
+          <button type="submit" class="btn">Agree and continue</button>
+        </form>
+        <p class="consent-version">Document version ${LEGAL_POLICY_VERSION}</p>
+      </div>
+    </section>
+  `,
   login: () => `
     <div class="login-screen">
       <div class="login-card card">
@@ -3536,27 +4347,6 @@ const views = {
       </div>
     </div>
   `,
-  tour: () => {
-    const slide = TOUR_SLIDES[tourStep];
-    const isLast = tourStep === TOUR_SLIDES.length - 1;
-
-    return `
-      <div class="login-screen">
-        <div class="login-card card tour-card">
-          <div class="tour-icon">${slide.icon}</div>
-          <h2>${escapeHTML(slide.title)}</h2>
-          <p class="text-muted">${escapeHTML(slide.body)}</p>
-          <div class="tour-dots">
-            ${TOUR_SLIDES.map((_, i) => `<span class="tour-dot ${i === tourStep ? "is-active" : ""}"></span>`).join("")}
-          </div>
-          <div class="tour-actions">
-            <button id="tour-skip-btn" class="btn-secondary">Skip</button>
-            <button id="tour-next-btn" class="btn">${isLast ? "Get Started" : "Next"}</button>
-          </div>
-        </div>
-      </div>
-    `;
-  },
   dashboard: () => `
     <section class="dashboard-hero">
       <div class="dashboard-greeting">
@@ -3569,6 +4359,8 @@ const views = {
         <strong>${state.user.level}</strong>
       </div>
     </section>
+
+    ${renderDashboardLockInCta()}
 
     ${renderFirstTimeWelcomeCard()}
     ${renderResumeLockInBanner()}
@@ -3844,20 +4636,27 @@ const views = {
     </div>
   `,
   calendar: () => `
-    <h2>Habit Calendar</h2>
-    <p class="text-muted">See your completion activity at a glance, week by week and month by month.</p>
+    <section class="view-heading calendar-view-heading">
+      <div>
+        <p class="dashboard-section__eyebrow">YOUR HABIT HISTORY</p>
+        <h2>Calendar</h2>
+        <p class="text-muted">Review daily check-ins, challenge wins, XP, and consistency over time.</p>
+      </div>
+      <div class="calendar-mode-switch" role="group" aria-label="Calendar view">
+        ${[["month", "Month"], ["week", "Week"], ["day", "Day"]].map(([mode, label]) => `
+          <button type="button" data-calendar-mode="${mode}" class="${calendarViewMode === mode ? "is-active" : ""}" aria-pressed="${calendarViewMode === mode}">${label}</button>
+        `).join("")}
+      </div>
+    </section>
 
-    ${renderWeeklyView()}
-
+    ${calendarViewMode === "month"
+      ? `${renderCalendarMonthInsights()}<section class="card calendar-month-view" aria-label="Monthly habit calendar">${renderCalendarGrid()}</section>`
+      : calendarViewMode === "week"
+      ? renderWeeklyView()
+      : ""}
+    ${renderCalendarDayDetails(calendarSelectedDate)}
     ${renderTodayHabitsCard()}
-
-    <div class="card" style="margin-top: var(--space-lg);">
-      ${renderCalendarGrid()}
-    </div>
-
     ${renderWeeklyWinsCard()}
-
-    ${renderDayDetailModal()}
   `,
   habits: () => renderHabitTracker(),
   badges: () => {
@@ -4002,6 +4801,27 @@ const views = {
       </div>
     </div>
 
+    <section class="settings-section card navigation-preferences" aria-labelledby="navigation-preferences-title">
+      <div class="settings-card-heading">
+        <h3 id="navigation-preferences-title">Navigation preferences</h3>
+        <p class="text-muted">Choose how Questify navigation is arranged on this device. Auto adapts to your screen until you choose a layout.</p>
+      </div>
+      <div class="navigation-choice-grid" role="group" aria-label="Navigation layout">
+        ${[
+          ["auto", "Auto", "Adapts to screen size", "↔"],
+          ["sidebar", "Sidebar", "Navigation beside your work", "☷"],
+          ["bottom", "Bottom bar", "Navigation along the bottom", "▱"],
+        ].map(([mode, label, description, glyph]) => `
+          <button type="button" class="navigation-choice ${state.preferences.navigationMode === mode ? "is-selected" : ""}" data-navigation-mode="${mode}" aria-pressed="${state.preferences.navigationMode === mode}">
+            <span class="navigation-choice__preview navigation-choice__preview--${mode}" aria-hidden="true"><span>${glyph}</span><i></i><i></i><i></i></span>
+            <strong>${label}</strong>
+            <small>${description}</small>
+            ${mode === "auto" ? `<small class="navigation-choice__hint">Recommended</small>` : ""}
+          </button>
+        `).join("")}
+      </div>
+    </section>
+
     <section class="settings-section card settings-theme-card" aria-labelledby="theme-picker-title">
       <div class="settings-card-heading">
         <h3 id="theme-picker-title">Choose your look</h3>
@@ -4126,8 +4946,19 @@ const views = {
           <h3 id="settings-privacy-title">Your privacy</h3>
           <p class="text-muted">Habits, challenges, and progress stay in this browser. Read what Questify stores and how browser notifications work.</p>
         </div>
-        <a class="btn-secondary btn-sm settings-privacy-link" href="privacy.html">Privacy policy</a>
+        <div class="settings-legal-links">
+          <a class="btn-secondary btn-sm settings-privacy-link" href="privacy.html">Privacy policy</a>
+          <a class="btn-secondary btn-sm settings-privacy-link" href="terms.html">Terms of Service</a>
+        </div>
       </section>
+
+    <section class="settings-section card tour-replay-card" aria-labelledby="tour-replay-title">
+      <div>
+        <h3 id="tour-replay-title">Product walkthrough</h3>
+        <p class="text-muted">Take a guided tour of the dashboard, habits, analytics, calendar, badges, and focus timer.</p>
+      </div>
+      <button type="button" id="replay-tour-btn" class="btn-secondary btn-sm">Replay tour</button>
+    </section>
 
     <div class="settings-section card">
       <div class="settings-row">
@@ -4268,6 +5099,13 @@ function attachDashboardHandlers() {
       navigateTo("challenges");
     });
   }
+
+  const startLockInBtn = document.getElementById("dashboard-lockin-btn");
+  if (startLockInBtn) {
+    startLockInBtn.addEventListener("click", () => {
+      navigateTo("challenges");
+    });
+  }
 }
 
 function attachHabitHandlers() {
@@ -4288,6 +5126,43 @@ function attachHabitHandlers() {
         return;
       }
 
+      const editButton = event.target.closest("[data-habit-edit]");
+      if (editButton) {
+        editingHabitId = editingHabitId === editButton.dataset.habitEdit ? null : editButton.dataset.habitEdit;
+        renderView();
+        return;
+      }
+
+      const deleteButton = event.target.closest("[data-habit-delete]");
+      if (deleteButton) {
+        confirmingHabitDeleteId = deleteButton.dataset.habitDelete;
+        renderView();
+        document.querySelector(".habit-delete-overlay [data-habit-delete-cancel]")?.focus();
+        return;
+      }
+
+      if (event.target.closest("[data-habit-delete-cancel]")) {
+        confirmingHabitDeleteId = null;
+        renderView();
+        return;
+      }
+
+      if (event.target.closest("[data-habit-delete-confirm]")) {
+        const deleted = deleteHabit(confirmingHabitDeleteId);
+        confirmingHabitDeleteId = null;
+        editingHabitId = null;
+        renderView();
+        if (deleted) showToast("Habit deleted. Previously earned XP remains yours.");
+        return;
+      }
+
+      const periodButton = event.target.closest("[data-habit-period]");
+      if (periodButton) {
+        habitAnalyticsPeriod = periodButton.dataset.habitPeriod;
+        renderView();
+        return;
+      }
+
       const navigateButton = event.target.closest("[data-navigate]");
       if (navigateButton) {
         navigateTo(navigateButton.dataset.navigate);
@@ -4300,8 +5175,10 @@ function attachHabitHandlers() {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const input = document.getElementById("add-habit-input");
+      const descriptionInput = document.getElementById("add-habit-description");
+      const difficultyInput = document.getElementById("add-habit-difficulty");
       const error = document.getElementById("add-habit-error");
-      const result = addHabit(input.value);
+      const result = addHabit(input.value, descriptionInput.value, difficultyInput.value);
       if (!result.ok) {
         error.textContent = result.error;
         input.classList.add("input-error");
@@ -4311,6 +5188,26 @@ function attachHabitHandlers() {
       document.getElementById("add-habit-input")?.focus();
     });
   }
+
+  document.querySelectorAll("[data-habit-edit-form]").forEach((editForm) => {
+    editForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const formData = new FormData(editForm);
+      const result = editHabit(
+        editForm.dataset.habitEditForm,
+        String(formData.get("title") || ""),
+        String(formData.get("description") || ""),
+        String(formData.get("difficulty") || "medium")
+      );
+      if (!result.ok) {
+        editForm.querySelector("[data-habit-edit-error]").textContent = result.error;
+        return;
+      }
+      editingHabitId = null;
+      renderView();
+      showToast("Habit updated. Its check-in history is unchanged.");
+    });
+  });
 
   const previousWeek = document.getElementById("habits-week-prev-btn");
   if (previousWeek) {
@@ -4333,10 +5230,39 @@ function attachHabitHandlers() {
 // Wire up the calendar view after it's rendered
 // -------------------------------------
 function attachCalendarHandlers() {
+  document.querySelectorAll("[data-calendar-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      calendarViewMode = button.dataset.calendarMode;
+      renderView();
+    });
+  });
+
+  const todayButton = document.getElementById("calendar-today-btn");
+  if (todayButton) {
+    todayButton.addEventListener("click", () => {
+      calendarSelectedDate = getTodayDateString();
+      calendarViewDate = new Date();
+      weekViewDate = new Date();
+      renderView();
+    });
+  }
+
+  document.querySelectorAll("[data-calendar-day-offset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      calendarSelectedDate = addDaysToDateString(calendarSelectedDate, Number(button.dataset.calendarDayOffset));
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
+      renderView();
+    });
+  });
+
   const prevBtn = document.getElementById("calendar-prev-btn");
   if (prevBtn) {
     prevBtn.addEventListener("click", () => {
-      calendarViewDate.setMonth(calendarViewDate.getMonth() - 1);
+      const selected = new Date(`${calendarSelectedDate}T00:00:00`);
+      const target = new Date(calendarViewDate.getFullYear(), calendarViewDate.getMonth() - 1, 1);
+      const day = Math.min(selected.getDate(), new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate());
+      calendarViewDate = target;
+      calendarSelectedDate = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       renderView();
     });
   }
@@ -4344,14 +5270,18 @@ function attachCalendarHandlers() {
   const nextBtn = document.getElementById("calendar-next-btn");
   if (nextBtn) {
     nextBtn.addEventListener("click", () => {
-      calendarViewDate.setMonth(calendarViewDate.getMonth() + 1);
+      const selected = new Date(`${calendarSelectedDate}T00:00:00`);
+      const target = new Date(calendarViewDate.getFullYear(), calendarViewDate.getMonth() + 1, 1);
+      const day = Math.min(selected.getDate(), new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate());
+      calendarViewDate = target;
+      calendarSelectedDate = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       renderView();
     });
   }
 
   document.querySelectorAll(".calendar-day[data-calendar-date]").forEach((dayButton) => {
     dayButton.addEventListener("click", () => {
-      dayDetailDate = dayButton.dataset.calendarDate;
+      calendarSelectedDate = dayButton.dataset.calendarDate;
       renderView();
     });
   });
@@ -4360,6 +5290,7 @@ function attachCalendarHandlers() {
   if (weekPrevBtn) {
     weekPrevBtn.addEventListener("click", () => {
       weekViewDate.setDate(weekViewDate.getDate() - 7);
+      calendarSelectedDate = addDaysToDateString(calendarSelectedDate, -7);
       renderView();
     });
   }
@@ -4368,6 +5299,7 @@ function attachCalendarHandlers() {
   if (weekNextBtn) {
     weekNextBtn.addEventListener("click", () => {
       weekViewDate.setDate(weekViewDate.getDate() + 7);
+      calendarSelectedDate = addDaysToDateString(calendarSelectedDate, 7);
       renderView();
     });
   }
@@ -4386,9 +5318,18 @@ function attachCalendarHandlers() {
 
       const dayCard = e.target.closest(".week-day-card");
       if (dayCard) {
-        dayDetailDate = dayCard.dataset.date;
+        calendarSelectedDate = dayCard.dataset.date;
         renderView();
       }
+    });
+
+    weekGrid.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const dayCard = event.target.closest(".week-day-card");
+      if (!dayCard) return;
+      event.preventDefault();
+      calendarSelectedDate = dayCard.dataset.date;
+      renderView();
     });
   }
 
@@ -4439,6 +5380,7 @@ function attachChallengesHandlers() {
       const difficultySelect = document.getElementById("lockin-difficulty-select");
       const durationSelect = document.getElementById("lockin-duration-select");
       const customInput = document.getElementById("lockin-custom-minutes-input");
+      const quietFocusInput = document.getElementById("lockin-start-quiet-input");
       const errorEl = document.getElementById("lockin-error");
 
       const isCustom = durationSelect.value === "custom";
@@ -4449,7 +5391,7 @@ function attachChallengesHandlers() {
         return;
       }
 
-      const result = startLockIn(titleInput.value, minutesValue, difficultySelect.value);
+      const result = startLockIn(titleInput.value, minutesValue, difficultySelect.value, quietFocusInput.checked);
       if (!result.ok) {
         errorEl.textContent = result.error;
         return;
@@ -4468,6 +5410,10 @@ function attachChallengesHandlers() {
       if (!option) return;
 
       lockinDurationSelect.value = option.dataset.duration;
+      if (option.dataset.duration !== "custom") {
+        state.preferences.lastLockInDuration = Number(option.dataset.duration);
+        saveState();
+      }
       lockinDurationOptions.querySelectorAll(".lockin-duration-option").forEach((button) => {
         const isSelected = button === option;
         button.classList.toggle("is-selected", isSelected);
@@ -4477,6 +5423,13 @@ function attachChallengesHandlers() {
       const isCustom = lockinDurationSelect.value === "custom";
       lockinCustomInput.classList.toggle("is-hidden", !isCustom);
       if (isCustom) lockinCustomInput.focus();
+    });
+    lockinCustomInput.addEventListener("input", () => {
+      const minutes = Number(lockinCustomInput.value);
+      if (minutes >= 1 && minutes <= 240) {
+        state.preferences.lastLockInDuration = minutes;
+        saveState();
+      }
     });
   }
 
@@ -4644,25 +5597,37 @@ function attachProfileHandlers() {
   }
 }
 
-async function updateApp(button) {
-  const originalLabel = button.textContent;
-  button.disabled = true;
-  button.textContent = "Checking…";
+async function prepareAppUpdate(requireServiceWorker = true) {
+  if (!navigator.onLine) throw new Error("An internet connection is required to update Questify.");
+  if (!("serviceWorker" in navigator)) {
+    if (requireServiceWorker) throw new Error("Service workers are not supported in this browser.");
+    return;
+  }
 
-  try {
-    if (!navigator.onLine) throw new Error("An internet connection is required to update Questify.");
-    if (!("serviceWorker" in navigator)) throw new Error("Service workers are not supported in this browser.");
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration) {
+    if (requireServiceWorker) throw new Error("No installed Questify app was found to update.");
+    return;
+  }
 
-    const registration = await navigator.serviceWorker.getRegistration();
-    if (!registration) throw new Error("No installed Questify app was found to update.");
-
-    await registration.update();
+  await registration.update();
+  if ("caches" in window) {
     const cacheNames = await caches.keys();
     await Promise.all(
       cacheNames
         .filter((name) => name.startsWith("questify-cache-"))
         .map((name) => caches.delete(name))
     );
+  }
+}
+
+async function updateApp(button) {
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "Checking…";
+
+  try {
+    await prepareAppUpdate();
     window.location.reload();
   } catch (error) {
     console.error("Failed to update Questify:", error);
@@ -4672,10 +5637,113 @@ async function updateApp(button) {
   }
 }
 
+function initPullToRefresh() {
+  const indicator = document.getElementById("pull-refresh-indicator");
+  const label = document.getElementById("pull-refresh-label");
+  if (!indicator || !label) return;
+
+  const refreshThreshold = 68;
+  let startY = null;
+  let pullDistance = 0;
+  let isRefreshing = false;
+
+  const canStartPull = (target, y) => (
+    !isRefreshing &&
+    window.scrollY <= 0 &&
+    y <= 72 &&
+    !target.closest("button, a, input, textarea, select, [contenteditable='true']")
+  );
+
+  const updateIndicator = (distance) => {
+    pullDistance = Math.min(92, Math.max(0, (distance - 5) * 0.58));
+    indicator.style.setProperty("--pull-distance", `${pullDistance}px`);
+    indicator.classList.add("is-pulling");
+    indicator.classList.toggle("is-ready", pullDistance >= refreshThreshold);
+    indicator.setAttribute("aria-hidden", "false");
+    label.textContent = pullDistance >= refreshThreshold ? "Release to refresh" : "Pull to refresh";
+  };
+
+  const resetIndicator = () => {
+    indicator.classList.remove("is-pulling", "is-ready", "is-refreshing");
+    indicator.style.removeProperty("--pull-distance");
+    indicator.setAttribute("aria-hidden", "true");
+    label.textContent = "Pull to refresh";
+    startY = null;
+    pullDistance = 0;
+  };
+
+  const refresh = async () => {
+    isRefreshing = true;
+    indicator.classList.remove("is-pulling", "is-ready");
+    indicator.classList.add("is-refreshing");
+    indicator.style.setProperty("--pull-distance", "76px");
+    label.textContent = "Refreshing Questify";
+    indicator.setAttribute("aria-hidden", "false");
+
+    try {
+      if (navigator.onLine) await prepareAppUpdate(false);
+      window.location.reload();
+    } catch (error) {
+      console.error("Failed to refresh Questify:", error);
+      showToast(`⚠️ ${escapeHTML(error.message || "Questify couldn't refresh.")}`);
+      isRefreshing = false;
+      resetIndicator();
+    }
+  };
+
+  document.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) {
+      resetIndicator();
+      return;
+    }
+    if (!canStartPull(event.target, event.touches[0].clientY)) return;
+    startY = event.touches[0].clientY;
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (event) => {
+    if (startY === null) return;
+    if (event.touches.length !== 1) {
+      resetIndicator();
+      return;
+    }
+    const distance = event.touches[0].clientY - startY;
+    if (distance <= 5 || window.scrollY > 0) return;
+    if (event.cancelable) event.preventDefault();
+    updateIndicator(distance);
+  }, { passive: false });
+
+  document.addEventListener("touchend", (event) => {
+    if (startY === null) return;
+    if (event.touches.length > 0) {
+      resetIndicator();
+      return;
+    }
+    const shouldRefresh = pullDistance >= refreshThreshold;
+    if (shouldRefresh) {
+      refresh();
+    } else {
+      resetIndicator();
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchcancel", resetIndicator, { passive: true });
+}
+
 // -------------------------------------
 // Wire up the settings view after it's rendered
 // -------------------------------------
 function attachSettingsHandlers() {
+  document.querySelectorAll("[data-navigation-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.preferences.navigationMode = button.dataset.navigationMode;
+      saveState();
+      applyNavigationLayout();
+      renderView();
+    });
+  });
+
+  document.getElementById("replay-tour-btn")?.addEventListener("click", startProductTour);
+
   const installBtn = document.getElementById("install-app-btn");
   if (installBtn) {
     installBtn.addEventListener("click", async () => {
@@ -4823,30 +5891,6 @@ function attachSettingsHandlers() {
 }
 
 // -------------------------------------
-// Wire up the onboarding tour after it's rendered
-// -------------------------------------
-function attachTourHandlers() {
-  const nextBtn = document.getElementById("tour-next-btn");
-  if (nextBtn) {
-    nextBtn.addEventListener("click", () => {
-      if (tourStep < TOUR_SLIDES.length - 1) {
-        tourStep += 1;
-        renderView();
-      } else {
-        finishTour();
-      }
-    });
-  }
-
-  const skipBtn = document.getElementById("tour-skip-btn");
-  if (skipBtn) {
-    skipBtn.addEventListener("click", () => {
-      finishTour();
-    });
-  }
-}
-
-// -------------------------------------
 // Wire up the login form after it's rendered
 // -------------------------------------
 function attachLoginFormHandler() {
@@ -4874,7 +5918,24 @@ function attachLoginFormHandler() {
     completeOnboarding(result.value);
     initNotifBell();
     tourStep = 0;
-    navigateTo(state.user.hasSeenTour ? "dashboard" : "tour");
+    if (state.user.hasSeenTour) {
+      navigateTo("dashboard");
+    } else {
+      startProductTour();
+    }
+  });
+}
+
+function attachConsentHandler() {
+  const form = document.getElementById("consent-form");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.querySelector('[name="privacy"]').checked || !form.querySelector('[name="terms"]').checked) {
+      document.getElementById("consent-error").textContent = "Please agree to both documents to continue.";
+      return;
+    }
+    acceptCurrentPolicies();
   });
 }
 
@@ -4882,7 +5943,9 @@ function attachLoginFormHandler() {
 // Render the current view into <main>
 // -------------------------------------
 function renderView() {
-  if (!isOnboarded() && currentView !== "login") {
+  if (!isCurrentPolicyAccepted() && currentView !== "consent") {
+    currentView = "consent";
+  } else if (!isOnboarded() && !["consent", "login"].includes(currentView)) {
     currentView = "login";
   }
 
@@ -4894,7 +5957,7 @@ function renderView() {
     return;
   }
 
-  mainEl.innerHTML = `${renderFn()}${renderLockInExitDialog()}`;
+  mainEl.innerHTML = `${renderFn()}${renderLockInExitDialog()}${isTourActive ? renderTourOverlay() : ""}`;
   updateActiveNavButton();
   toggleHeaderVisibility();
   attachLockInExitDialogHandlers();
@@ -4903,8 +5966,8 @@ function renderView() {
     attachLoginFormHandler();
   }
 
-  if (currentView === "tour") {
-    attachTourHandlers();
+  if (currentView === "consent") {
+    attachConsentHandler();
   }
 
   if (currentView === "profile") {
@@ -4936,6 +5999,10 @@ function renderView() {
   if (currentView === "habits") {
     attachHabitHandlers();
   }
+
+  if (isTourActive) {
+    attachTourHandlers();
+  }
 }
 
 // -------------------------------------
@@ -4950,19 +6017,38 @@ function updateActiveNavButton() {
     } else {
       btn.removeAttribute("aria-current");
     }
-    if (isActive && window.matchMedia("(max-width: 767px)").matches) {
-      const nav = btn.closest(".app-nav");
-      if (!nav) return;
-      const buttonRect = btn.getBoundingClientRect();
-      const navRect = nav.getBoundingClientRect();
-      const centeredLeft = nav.scrollLeft + buttonRect.left - navRect.left -
-        (nav.clientWidth - btn.offsetWidth) / 2;
-      nav.scrollTo({
-        left: Math.max(0, centeredLeft),
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      });
-    }
   });
+  const activeMoreView = ["badges", "profile", "settings"].includes(currentView);
+  const moreToggle = document.getElementById("nav-more-toggle");
+  const nav = moreToggle?.closest(".app-nav");
+  const secondaryNav = nav?.querySelector(".app-nav-secondary");
+  secondaryNav?.classList.toggle(
+    "is-expanded",
+    activeMoreView || Boolean(nav?.classList.contains("is-more-open"))
+  );
+  if (moreToggle) {
+    moreToggle.classList.toggle("is-active", activeMoreView);
+    moreToggle.setAttribute("aria-current", activeMoreView ? "page" : "false");
+  }
+}
+
+function applyNavigationLayout() {
+  const requestedMode = ["sidebar", "bottom"].includes(state.preferences.navigationMode)
+    ? state.preferences.navigationMode
+    : "auto";
+  const effectiveMode = requestedMode === "auto"
+    ? (window.matchMedia("(min-width: 768px)").matches ? "sidebar" : "bottom")
+    : requestedMode;
+  document.body.classList.toggle("nav-layout-sidebar", effectiveMode === "sidebar");
+  document.body.classList.toggle("nav-layout-bottom", effectiveMode === "bottom");
+  document.body.classList.toggle("is-nav-collapsed", effectiveMode === "sidebar" && isSidebarCollapsed);
+  const button = document.getElementById("sidebar-collapse-btn");
+  if (button) {
+    button.setAttribute("aria-expanded", String(!isSidebarCollapsed));
+    button.setAttribute("aria-label", isSidebarCollapsed ? "Expand navigation" : "Collapse navigation");
+    button.title = isSidebarCollapsed ? "Expand navigation" : "Collapse navigation";
+    button.textContent = isSidebarCollapsed ? "›" : "‹";
+  }
 }
 
 // -------------------------------------
@@ -4974,11 +6060,17 @@ function navigateTo(viewName, pushToHistory = true) {
     console.error(`Cannot navigate: "${viewName}" is not a valid view.`);
     return;
   }
+  if (isTourActive && destination !== tourTargetView) {
+    isTourActive = false;
+    clearTourPositioning();
+  }
 
   if (currentView === "challenges" && destination !== "challenges") {
     stopLockInTicker();
   }
 
+  document.querySelector(".app-nav")?.classList.remove("is-more-open");
+  document.getElementById("nav-more-toggle")?.setAttribute("aria-expanded", "false");
   currentView = destination;
   isEditingName = false;
   searchQuery = "";
@@ -4989,12 +6081,17 @@ function navigateTo(viewName, pushToHistory = true) {
   if (destination === "calendar" || destination === "habits") {
     calendarViewDate = new Date(); // always open Calendar on the current month
     weekViewDate = new Date(); // and the current week
+    calendarSelectedDate = getTodayDateString();
+    dayDetailDate = null;
+    editingHabitId = null;
+    confirmingHabitDeleteId = null;
   }
 
   if (pushToHistory) {
     history.pushState({ view: destination }, "", `${window.location.pathname}${window.location.search}`);
   }
 
+  window.scrollTo(0, 0);
   renderView();
 }
 
@@ -5006,6 +6103,36 @@ navButtons.forEach((btn) => {
     navigateTo(btn.dataset.view);
   });
 });
+
+const sidebarCollapseButton = document.getElementById("sidebar-collapse-btn");
+if (sidebarCollapseButton) {
+  sidebarCollapseButton.addEventListener("click", () => {
+    isSidebarCollapsed = !isSidebarCollapsed;
+    state.preferences.sidebarCollapsed = isSidebarCollapsed;
+    saveState();
+    applyNavigationLayout();
+  });
+}
+
+const navMoreToggle = document.getElementById("nav-more-toggle");
+if (navMoreToggle) {
+  navMoreToggle.addEventListener("click", () => {
+    const nav = navMoreToggle.closest(".app-nav");
+    const isOpen = nav?.classList.toggle("is-more-open") || false;
+    navMoreToggle.setAttribute("aria-expanded", String(isOpen));
+    updateActiveNavButton();
+  });
+}
+
+document.addEventListener("click", (event) => {
+  const nav = document.querySelector(".app-nav");
+  if (!nav || nav.contains(event.target) || !nav.classList.contains("is-more-open")) return;
+  nav.classList.remove("is-more-open");
+  navMoreToggle?.setAttribute("aria-expanded", "false");
+  updateActiveNavButton();
+});
+
+window.addEventListener("resize", applyNavigationLayout);
 
 // -------------------------------------
 // Handle browser back/forward buttons
@@ -5022,7 +6149,16 @@ window.addEventListener("popstate", (event) => {
 // -------------------------------------
 function init() {
   loadState();
+  previouslyOnboarded = isOnboarded();
+  isSidebarCollapsed = Boolean(state.preferences.sidebarCollapsed);
+  applyNavigationLayout();
   applyTheme();
+
+  if (!isCurrentPolicyAccepted()) {
+    navigateTo("consent", false);
+    console.log("Questify requires local acceptance of the current policy version.");
+    return;
+  }
 
   if (!isOnboarded()) {
     navigateTo("login", true);
@@ -5034,8 +6170,9 @@ function init() {
   checkDailyReminder();
 
   const hashView = window.location.hash.replace("#", "");
-  const startingView =
-    (hashView === "stats" ? "profile" : views[hashView] && hashView !== "tour" ? hashView : "dashboard");
+  const startingView = getActiveLockIn()?.wasInterrupted
+    ? "challenges"
+    : (hashView === "stats" ? "profile" : views[hashView] && hashView !== "tour" ? hashView : "dashboard");
   if (hashView) {
     history.replaceState({ view: startingView }, "", `${window.location.pathname}${window.location.search}`);
   }
@@ -5071,6 +6208,7 @@ function renderErrorBoundary(error) {
 }
 
 try {
+  initPullToRefresh();
   init();
 } catch (error) {
   renderErrorBoundary(error);
