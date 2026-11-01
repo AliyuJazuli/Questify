@@ -27,7 +27,7 @@
 
       <section>
         <h2>Data stored on your device</h2>
-        <p>Questify is a static app with no account or Questify user-data backend. Your profile name, habits, challenges, check-ins, XP, badges, saved Sticky Notes, preferences (including pinned-widget positions), and notification history are saved in this browser's local storage. A Lock In note stays with its active session unless you save it to Sticky Notes. The app's offline files are cached by its service worker.</p>
+        <p>Questify is a static app with no account or Questify user-data backend. Your profile name, habits, challenges, check-ins, XP, badges, saved Sticky Notes, preferences, and notification history are saved in this browser's local storage. A Lock In note stays with its active session unless you save it to Sticky Notes. The app's offline files are cached by its service worker. Open browser Picture-in-Picture windows are temporary and are not persisted in local storage.</p>
         <p>This data stays in the browser storage on your device; it is not synchronized to Questify servers. Clearing this browser's site data removes the saved progress and offline cache. If you use multiple browsers or devices, your data does not automatically sync between them.</p>
       </section>
 
@@ -39,7 +39,7 @@
 
       <section>
         <h2>Sticky Notes windows</h2>
-        <p>A saved note opened in its own window continues to use the same local storage as Questify. Edits and pin status sync between open Questify windows in the same browser profile.</p>
+        <p>A saved note opened in its own window continues to use the same local storage as Questify. Where supported, a note or Lock In item can also be opened in a browser-controlled Picture-in-Picture window. These floating windows are tied to their opener and may close when it closes; their visibility and minimize behavior depend on the browser and operating system. Floating-window state is temporary and is not saved as user progress.</p>
       </section>
 
       <section>
