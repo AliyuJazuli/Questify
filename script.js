@@ -30,6 +30,10 @@ if (!appRoot || !mainEl) {
 // -------------------------------------
 const STORAGE_KEY = "questify_state";
 const LEGAL_POLICY_VERSION = "1.0";
+const isLockInFocusWindow = new URLSearchParams(window.location.search).get("focus") === "lockin";
+const lockInStateChannel = "BroadcastChannel" in window
+  ? new BroadcastChannel("questify-lockin-state")
+  : null;
 
 // -------------------------------------
 // App-wide configuration constants
@@ -45,10 +49,10 @@ const CONFIG = {
 };
 
 const APP_THEMES = [
+  { id: "sunset", name: "Sunset", description: "Rounded, warm and playful", color: "#fff1e6", swatches: ["#fff1e6", "#fb8b68", "#a94e37"] },
   { id: "ocean", name: "Ocean", description: "Crisp coastal glass", color: "#071b2c", swatches: ["#071b2c", "#38bdf8", "#0f6b8f"] },
   { id: "aurora", name: "Aurora", description: "Soft, airy sea glass", color: "#eaf5f2", swatches: ["#eaf5f2", "#62c7a6", "#176d65"] },
   { id: "forest", name: "Forest", description: "Quiet botanical editorial", color: "#edf4e9", swatches: ["#edf4e9", "#8dbb75", "#3f6b43"] },
-  { id: "sunset", name: "Sunset", description: "Rounded, warm and playful", color: "#fff1e6", swatches: ["#fff1e6", "#fb8b68", "#a94e37"] },
   { id: "lavender", name: "Lavender", description: "Dreamy, elegant dusk", color: "#1d1830", swatches: ["#1d1830", "#c4a7ff", "#7251b5"] },
   { id: "midnight", name: "Midnight", description: "Sharp, focused terminal", color: "#111827", swatches: ["#111827", "#fbbf24", "#9a6f18"] },
 ];
@@ -69,19 +73,27 @@ function getDefaultState() {
     challenges: [],
     habits: [],
     habitXpLedger: [],
+    notes: [],
     legalAcceptance: null,
     unlockedBadgeIds: [],
     notifications: [],
     preferences: {
-      theme: "ocean",
+      theme: "sunset",
       soundEnabled: true,
       hapticsEnabled: true,
       remindersEnabled: false,
       lastReminderDate: null,
       blockNotificationsDuringLockIn: false,
       lastLockInDuration: 60,
+      lockInNote: "",
+      lockInNoteColor: "#fff1a8",
       sidebarCollapsed: false,
       navigationMode: "auto",
+      floatingLockInTimer: false,
+      floatingSessionNote: false,
+      floatingNoteId: null,
+      floatingTimerPosition: null,
+      floatingNotePosition: null,
     },
   };
 }
@@ -94,9 +106,21 @@ let state = getDefaultState();
 function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    window.__questifyState = state;
+    lockInStateChannel?.postMessage({ type: "state-updated" });
   } catch (err) {
     console.error("Failed to save state:", err);
   }
+}
+
+function normalizeFloatingPosition(position) {
+  if (!position || typeof position !== "object") return null;
+  const { x, y } = position;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    x: Math.max(0, Math.min(10000, Math.round(x))),
+    y: Math.max(0, Math.min(10000, Math.round(y))),
+  };
 }
 
 function loadState() {
@@ -114,6 +138,18 @@ function loadState() {
       state = {
         ...defaultState,
         ...savedState,
+        notes: Array.isArray(savedState.notes)
+          ? savedState.notes
+              .filter((note) => note && typeof note === "object")
+              .map((note) => ({
+                id: typeof note.id === "string" ? note.id : generateId(),
+                title: (typeof note.title === "string" ? note.title : "Untitled note").slice(0, 80),
+                content: (typeof note.content === "string" ? note.content : "").slice(0, 2000),
+                color: /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8",
+                createdAt: typeof note.createdAt === "string" ? note.createdAt : new Date().toISOString(),
+                updatedAt: typeof note.updatedAt === "string" ? note.updatedAt : new Date().toISOString(),
+              }))
+          : [],
         legalAcceptance: savedState.legalAcceptance && typeof savedState.legalAcceptance === "object"
           ? {
               policyVersion: typeof savedState.legalAcceptance.policyVersion === "string"
@@ -133,6 +169,7 @@ function loadState() {
                 title: typeof habit.title === "string" ? habit.title : "",
                 description: typeof habit.description === "string" ? habit.description : "",
                 difficulty: ["easy", "medium", "hard"].includes(habit.difficulty) ? habit.difficulty : "medium",
+                category: getHabitCategoryId(habit.category),
                 createdDate: /^\d{4}-\d{2}-\d{2}$/.test(habit.createdDate || "")
                   ? habit.createdDate
                   : typeof habit.createdAt === "string" && /^\d{4}-\d{2}-\d{2}/.test(habit.createdAt)
@@ -176,11 +213,36 @@ function loadState() {
             ? savedState.preferences.navigationMode
             : "auto",
           lastLockInDuration: Math.min(240, Math.max(1, Number(savedState.preferences?.lastLockInDuration) || defaultState.preferences.lastLockInDuration)),
+          lockInNote: typeof savedState.preferences?.lockInNote === "string"
+            ? savedState.preferences.lockInNote.slice(0, 500)
+            : defaultState.preferences.lockInNote,
+          lockInNoteColor: /^#[0-9a-f]{6}$/i.test(savedState.preferences?.lockInNoteColor || "")
+            ? savedState.preferences.lockInNoteColor
+            : defaultState.preferences.lockInNoteColor,
+          floatingLockInTimer: Boolean(savedState.preferences?.floatingLockInTimer),
+          floatingSessionNote: Boolean(savedState.preferences?.floatingSessionNote),
+          floatingNoteId: typeof savedState.preferences?.floatingNoteId === "string"
+            ? savedState.preferences.floatingNoteId
+            : null,
+          floatingTimerPosition: normalizeFloatingPosition(savedState.preferences?.floatingTimerPosition),
+          floatingNotePosition: normalizeFloatingPosition(savedState.preferences?.floatingNotePosition),
           theme: APP_THEMES.some((theme) => theme.id === migratedTheme)
             ? migratedTheme
             : defaultState.preferences.theme,
         },
       };
+      const legacyNote = state.preferences.lockInNote;
+      if (legacyNote.trim() && !state.notes.some((note) => note.id === "legacy-lockin-note")) {
+        state.notes.unshift({
+          id: "legacy-lockin-note",
+          title: "Lock In note",
+          content: legacyNote,
+          color: state.preferences.lockInNoteColor,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      state.preferences.lockInNote = "";
       console.log("Loaded existing state from localStorage.");
     } else {
       state = getDefaultState();
@@ -190,6 +252,7 @@ function loadState() {
     console.error("Failed to load state, falling back to default:", err);
     state = getDefaultState();
   }
+  window.__questifyState = state;
 }
 
 window.__questifyState = state;
@@ -215,6 +278,61 @@ let habitAnalyticsPeriod = "week";
 let editingHabitId = null;
 let confirmingHabitDeleteId = null;
 let isSidebarCollapsed = false;
+let isMobileNavigationOpen = false;
+let lockInPictureInPictureWindow = null;
+let lockInPictureInPictureInterval = null;
+let stickyNotePictureInPictureWindow = null;
+let stickyNotePictureInPictureInterval = null;
+let stickyNotePictureInPictureNoteId = null;
+
+function getLockInSyncSignature() {
+  const active = getActiveLockIn();
+  return JSON.stringify([
+    active?.id || null,
+    active?.isPaused || false,
+    active?.targetMinutes || 0,
+    active?.completed || false,
+    active?.title || "",
+  ]);
+}
+
+function getNotesSyncSignature() {
+  const active = getActiveLockIn();
+  return JSON.stringify([
+    state.notes,
+    active?.sessionNote || "",
+    active?.sessionNoteColor || "",
+    active?.savedNoteId || "",
+  ]);
+}
+
+function handleLockInStateSync() {
+  const previousSignature = getLockInSyncSignature();
+  const previousNotesSignature = getNotesSyncSignature();
+  const noteIsFocused = document.activeElement?.matches(
+    "#lockin-note-input, [data-floating-note-content], [data-note-content], [data-note-title]"
+  );
+  loadState();
+  window.__questifyState = state;
+  applyTheme();
+  const sessionChanged = previousSignature !== getLockInSyncSignature();
+  const notesChanged = previousNotesSignature !== getNotesSyncSignature();
+  if (!noteIsFocused && (
+    isLockInFocusWindow ||
+    (sessionChanged && ["challenges", "dashboard"].includes(currentView)) ||
+    (notesChanged && currentView === "notes")
+  )) {
+    renderView();
+  } else {
+    syncSessionNoteInput();
+    if (!noteIsFocused) renderFloatingWidgets();
+  }
+}
+
+lockInStateChannel?.addEventListener("message", handleLockInStateSync);
+window.addEventListener("storage", (event) => {
+  if (event.key === STORAGE_KEY) handleLockInStateSync();
+});
 
 // Singleton debounced functions to prevent memory leaks
 let debouncedSearchRerender = null;
@@ -300,7 +418,7 @@ function toggleHeaderVisibility() {
 function applyTheme() {
   const activeTheme = APP_THEMES.some((theme) => theme.id === state.preferences.theme)
     ? state.preferences.theme
-    : "ocean";
+    : "sunset";
   document.documentElement.setAttribute("data-theme", activeTheme);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
   if (themeColorMeta) {
@@ -446,6 +564,10 @@ function escapeHTML(str) {
   return div.innerHTML;
 }
 
+function escapeAttribute(str) {
+  return escapeHTML(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 // -------------------------------------
 // Validation: reusable utility
 // -------------------------------------
@@ -512,8 +634,20 @@ const CATEGORY_CONFIG = {
   lockin: { label: "Lock In", icon: "🔒" },
 };
 
+const HABIT_CATEGORY_IDS = ["general", "health", "work", "learning", "personal"];
+
 function getCategoryConfig(category) {
   return CATEGORY_CONFIG[category] || CATEGORY_CONFIG.general;
+}
+
+function getHabitCategoryId(category) {
+  return HABIT_CATEGORY_IDS.includes(category) ? category : "general";
+}
+
+function renderHabitCategoryTag(category) {
+  const categoryId = getHabitCategoryId(category);
+  const config = getCategoryConfig(categoryId);
+  return `<span class="category-tag habit-category-tag">${config.icon} ${escapeHTML(config.label)}</span>`;
 }
 
 // -------------------------------------
@@ -686,7 +820,7 @@ function deleteChallenge(id) {
   saveState();
 }
 
-function addHabit(title, description = "", difficulty = "medium") {
+function addHabit(title, description = "", difficulty = "medium", category = "general") {
   const result = validateText(title, {
     ...VALIDATION_RULES.challengeTitle,
     fieldName: "Habit name",
@@ -704,6 +838,7 @@ function addHabit(title, description = "", difficulty = "medium") {
     createdDate: getTodayDateString(),
     description: cleanDescription,
     difficulty: CONFIG.HABIT_XP_REWARDS[difficulty] ? difficulty : "medium",
+    category: getHabitCategoryId(category),
     completedDates: [],
     xpAwardedDates: [],
     archived: false,
@@ -712,7 +847,7 @@ function addHabit(title, description = "", difficulty = "medium") {
   return { ok: true };
 }
 
-function editHabit(id, title, description, difficulty) {
+function editHabit(id, title, description, difficulty, category) {
   const habit = state.habits.find((item) => item.id === id);
   if (!habit) return { ok: false, error: "This habit could not be found." };
   const result = validateText(title, {
@@ -728,6 +863,7 @@ function editHabit(id, title, description, difficulty) {
   habit.title = result.value;
   habit.description = cleanDescription;
   if (CONFIG.HABIT_XP_REWARDS[difficulty]) habit.difficulty = difficulty;
+  habit.category = getHabitCategoryId(category);
   saveState();
   return { ok: true };
 }
@@ -1168,6 +1304,8 @@ function startLockIn(title, targetMinutes, difficulty = "medium", quietFocusEnab
     wasInterrupted: false,
     notifiedAtTarget: false,
     actualMinutes: null,
+    sessionNote: "",
+    sessionNoteColor: getRandomLockInNoteColor(),
   };
 
   state.challenges.push(newSession);
@@ -1208,13 +1346,33 @@ function finishLockIn(id) {
   const elapsedSec = getLockInElapsedSeconds(challenge);
   challenge.actualMinutes = Math.max(1, Math.round(elapsedSec / 60));
   challenge.xpValue = computeLockInXp(challenge.targetMinutes, challenge.actualMinutes, challenge.difficulty);
+  const savedNoteId = challenge.savedNoteId;
+  delete challenge.sessionNote;
+  delete challenge.sessionNoteColor;
+  delete challenge.savedNoteId;
+  state.preferences.floatingLockInTimer = false;
+  if (state.preferences.floatingSessionNote) {
+    state.preferences.floatingSessionNote = false;
+    state.preferences.floatingNoteId = savedNoteId || null;
+  }
   completeChallenge(id);
   stopLockInTicker();
+  closeLockInPictureInPicture();
 }
 
 function cancelLockIn(id) {
+  const active = state.challenges.find((challenge) => challenge.id === id);
+  if (active) {
+    const savedNoteId = active.savedNoteId;
+    state.preferences.floatingLockInTimer = false;
+    if (state.preferences.floatingSessionNote) {
+      state.preferences.floatingSessionNote = false;
+      state.preferences.floatingNoteId = savedNoteId || null;
+    }
+  }
   deleteChallenge(id);
   stopLockInTicker();
+  closeLockInPictureInPicture();
 }
 
 function setBlockNotificationsDuringLockIn(enabled) {
@@ -1233,7 +1391,7 @@ function updateLockInTimerDisplay() {
   const progressEl = document.getElementById("lockin-progress-fill");
   const pauseBtn = document.getElementById("lockin-pause-btn");
 
-  if (!active || !timeEl) {
+  if (!active) {
     stopLockInTicker();
     return;
   }
@@ -1249,9 +1407,11 @@ function updateLockInTimerDisplay() {
   const progressPercent = Math.min(100, (elapsedSec / targetSec) * 100);
 
   if (overBy >= 0) {
-    timeEl.textContent = overBy === 0
-      ? "Focus block complete"
-      : `${formatLockInClock(overBy)} overtime`;
+    if (timeEl) {
+      timeEl.textContent = overBy === 0
+        ? "Focus block complete"
+        : `${formatLockInClock(overBy)} overtime`;
+    }
     if (statusEl) {
       statusEl.textContent = active.isPaused ? "⏸️ Paused (in overtime)" : "🔥 Overtime - keep going or finish anytime";
       statusEl.classList.toggle("is-overtime", !active.isPaused);
@@ -1266,10 +1426,10 @@ function updateLockInTimerDisplay() {
       active.notifiedAtTarget = true;
       saveState();
       addNotification(`Lock In time's up for "${active.title}" - you can keep going!`, "⏰");
-      triggerCompletionFeedback();
+      if (!areQuestifyNotificationsMuted()) triggerCompletionFeedback();
     }
   } else {
-    timeEl.textContent = `${formatLockInClock(remainingSec)} remaining`;
+    if (timeEl) timeEl.textContent = `${formatLockInClock(remainingSec)} remaining`;
     if (statusEl) {
       statusEl.textContent = active.isPaused ? "⏸️ Paused" : "Locked in...";
       statusEl.classList.remove("is-overtime");
@@ -1283,6 +1443,8 @@ function updateLockInTimerDisplay() {
 
   const xpEl = document.getElementById("lockin-xp-preview");
   if (xpEl) xpEl.textContent = `~${projectedXp} XP so far`;
+  updateLockInPictureInPicture(active, elapsedSec);
+  updateFloatingTimerDisplay();
 }
 
 function startLockInTicker() {
@@ -1365,6 +1527,7 @@ function attachLockInExitDialogHandlers() {
 }
 
 window.addEventListener("beforeunload", (event) => {
+  if (isLockInFocusWindow && window.opener && !window.opener.closed) return;
   const active = getActiveLockIn();
   if (!active || active.isPaused) return;
 
@@ -1372,7 +1535,10 @@ window.addEventListener("beforeunload", (event) => {
   event.returnValue = "";
 });
 
-window.addEventListener("pagehide", handleLockInPageHide);
+window.addEventListener("pagehide", () => {
+  if (isLockInFocusWindow && window.opener && !window.opener.closed) return;
+  handleLockInPageHide();
+});
 window.addEventListener("pageshow", (event) => {
   if (event.persisted && getActiveLockIn()?.wasInterrupted) renderView();
 });
@@ -2198,7 +2364,7 @@ function triggerActionFeedback() {
 // Notifications: persistent log
 // -------------------------------------
 function addNotification(message, icon) {
-  if (state.preferences.blockNotificationsDuringLockIn && getActiveLockIn()) return;
+  if (areQuestifyNotificationsMuted()) return;
 
   const notification = {
     id: generateId(),
@@ -2214,6 +2380,10 @@ function addNotification(message, icon) {
 
   showToast(`${escapeHTML(icon)} ${escapeHTML(message)}`);
   renderNotifBell();
+}
+
+function areQuestifyNotificationsMuted() {
+  return Boolean(state.preferences.blockNotificationsDuringLockIn && getActiveLockIn());
 }
 
 function markNotificationRead(id) {
@@ -2283,7 +2453,6 @@ function renderNotifBell() {
 function initNotifBell() {
   // Only attach once to prevent memory leaks
   if (attachedHandlers.notifBell) return;
-  attachedHandlers.notifBell = true;
 
   const bellBtn = document.getElementById("notif-bell-btn");
   const panel = document.getElementById("notif-panel");
@@ -2291,6 +2460,7 @@ function initNotifBell() {
   const listEl = document.getElementById("notif-list");
 
   if (!bellBtn || !panel || !clearBtn || !listEl) return;
+  attachedHandlers.notifBell = true;
 
   bellBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -2366,7 +2536,7 @@ function getFilteredChallenges() {
 let toastTimeoutId = null;
 
 function showToast(message) {
-  if (state.preferences.blockNotificationsDuringLockIn && getActiveLockIn()) return;
+  if (areQuestifyNotificationsMuted()) return;
 
   const toastEl = document.getElementById("toast");
   if (!toastEl) return;
@@ -2701,7 +2871,7 @@ function getCategoryBalanceThisWeek() {
 // -------------------------------------
 function checkDailyReminder() {
   if (!state.preferences.remindersEnabled) return;
-  if (state.preferences.blockNotificationsDuringLockIn && getActiveLockIn()) return;
+  if (areQuestifyNotificationsMuted()) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
 
   const today = getTodayDateString();
@@ -2719,6 +2889,7 @@ function checkDailyReminder() {
     });
   } catch (err) {
     console.warn("Notification failed:", err);
+    return;
   }
 
   state.preferences.lastReminderDate = today;
@@ -3273,6 +3444,7 @@ function renderCalendarDayDetails(dateStr) {
             <span class="calendar-day-habit__info">
               <span class="calendar-day-habit__title">${escapeHTML(habit.title)}</span>
               ${habit.description ? `<small>${escapeHTML(habit.description)}</small>` : ""}
+              ${renderHabitCategoryTag(habit.category)}
               <span class="difficulty-tag difficulty-${escapeHTML(habit.difficulty || "medium")}">${escapeHTML(getDifficultyConfig(habit.difficulty || "medium").label)}</span>
             </span>
             <strong>${completedIds.has(habit.id)
@@ -3490,7 +3662,10 @@ function renderHabitDailyRow(habit, dateStr) {
   return `
     <div class="habit-daily-row ${isComplete ? "is-complete" : ""}">
       ${renderHabitCheckButton(habit, dateStr)}
-      <span class="habit-daily-row__title">${escapeHTML(habit.title)}</span>
+      <span class="habit-daily-row__identity">
+        <span class="habit-daily-row__title">${escapeHTML(habit.title)}</span>
+        ${renderHabitCategoryTag(habit.category)}
+      </span>
       <span class="habit-daily-row__xp">${xpEntry ? `+${xpEntry.amount} XP earned` : `+${reward} XP`}</span>
     </div>
   `;
@@ -3689,6 +3864,9 @@ function renderHabitTracker() {
   const difficultyOptions = (selected) => Object.entries(CONFIG.HABIT_XP_REWARDS)
     .map(([difficulty, reward]) => `<option value="${difficulty}" ${selected === difficulty ? "selected" : ""}>${difficulty[0].toUpperCase()}${difficulty.slice(1)} · ${reward} XP</option>`)
     .join("");
+  const categoryOptions = (selected = "general") => HABIT_CATEGORY_IDS
+    .map((categoryId) => `<option value="${categoryId}" ${getHabitCategoryId(selected) === categoryId ? "selected" : ""}>${getCategoryConfig(categoryId).icon} ${getCategoryConfig(categoryId).label}</option>`)
+    .join("");
   const renderHabitManagerRow = (habit) => {
     const stats = getHabitCompletionRate([habit], habit.createdDate || (habit.createdAt || "").slice(0, 10), getTodayDateString());
     const streak = getHabitStreakStats(habit);
@@ -3699,6 +3877,7 @@ function renderHabitTracker() {
           <div class="habit-manager-row__heading">
             <span class="habit-manager-row__icon" aria-hidden="true">✦</span>
             <strong class="habit-manager-row__title">${escapeHTML(habit.title)}</strong>
+            ${renderHabitCategoryTag(habit.category)}
             <span class="difficulty-tag difficulty-${habit.difficulty || "medium"}">${(habit.difficulty || "medium")[0].toUpperCase()}${(habit.difficulty || "medium").slice(1)}</span>
           </div>
           ${habit.description ? `<p class="habit-manager-row__description text-muted">${escapeHTML(habit.description)}</p>` : ""}
@@ -3716,6 +3895,7 @@ function renderHabitTracker() {
             <label>Habit name<input name="title" value="${escapeHTML(habit.title)}" maxlength="50" required></label>
             <label>Description<input name="description" value="${escapeHTML(habit.description || "")}" maxlength="180" placeholder="What does this habit mean to you?"></label>
             <label>Difficulty<select name="difficulty">${difficultyOptions(habit.difficulty || "medium")}</select></label>
+            <label>Category<select name="category">${categoryOptions(habit.category)}</select></label>
             <p class="error-text" data-habit-edit-error></p>
             <button type="submit" class="btn btn-sm">Save changes</button>
           </form>
@@ -3802,7 +3982,7 @@ function renderHabitTracker() {
       <div class="habit-card-heading">
         <div>
           <h3 id="habit-manager-title">Your daily habits</h3>
-          <p class="text-muted">Edit names, descriptions, and difficulty without losing check-in history. A check-in earns XP once per habit per date.</p>
+          <p class="text-muted">Edit names, descriptions, difficulty, and category without losing check-in history. A check-in earns XP once per habit per date.</p>
         </div>
       </div>
       <form id="add-habit-form" class="add-habit-form" novalidate>
@@ -3812,6 +3992,8 @@ function renderHabitTracker() {
         <input id="add-habit-description" name="description" type="text" maxlength="180" placeholder="Description (optional)">
         <label class="sr-only" for="add-habit-difficulty">Habit difficulty</label>
         <select id="add-habit-difficulty" name="difficulty">${difficultyOptions("medium")}</select>
+        <label class="sr-only" for="add-habit-category">Habit category</label>
+        <select id="add-habit-category" name="category">${categoryOptions()}</select>
         <button class="btn" type="submit">Add habit</button>
       </form>
       <p class="error-text" id="add-habit-error" role="status"></p>
@@ -3859,6 +4041,7 @@ function renderHabitTracker() {
                 <tr>
                   <th scope="row" class="habit-week-table__habit">
                     <span>${escapeHTML(habit.title)}</span>
+                    ${renderHabitCategoryTag(habit.category)}
                   </th>
                   ${days.map((day) => `
                     <td class="${day.isToday ? "is-today" : ""}">
@@ -3926,6 +4109,560 @@ function renderWeeklyWinsCard() {
 // -------------------------------------
 // Lock In: panel render helper
 // -------------------------------------
+const LOCKIN_NOTE_COLORS = [
+  { value: "#fff1a8", label: "Sunshine" },
+  { value: "#ffd6dc", label: "Rose" },
+  { value: "#cdeaff", label: "Sky" },
+  { value: "#d7f4cb", label: "Mint" },
+];
+
+function getRandomLockInNoteColor() {
+  return LOCKIN_NOTE_COLORS[Math.floor(Math.random() * LOCKIN_NOTE_COLORS.length)].value;
+}
+
+function getLockInNoteInk(color) {
+  const channels = color.slice(1).match(/.{2}/g).map((channel) => parseInt(channel, 16) / 255);
+  const luminance = channels
+    .map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+  return luminance > 0.42 ? "#302817" : "#ffffff";
+}
+
+function renderLockInStickyNote() {
+  const active = getActiveLockIn();
+  if (!active) return "";
+  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
+    ? active.sessionNoteColor
+    : "#fff1a8";
+  const savedNote = active.savedNoteId
+    ? state.notes.find((note) => note.id === active.savedNoteId)
+    : null;
+  return `
+    <section class="lockin-sticky-note" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-labelledby="lockin-note-title">
+      <div class="lockin-sticky-note__top">
+        <label id="lockin-note-title" for="lockin-note-input">Sticky note</label>
+        <span id="lockin-note-saved" role="status">${savedNote ? "Saved to Sticky Notes" : "Session only"}</span>
+      </div>
+      <textarea id="lockin-note-input" maxlength="500" rows="3" placeholder="Keep your next thought here…">${escapeHTML(active.sessionNote || "")}</textarea>
+      <div class="lockin-sticky-note__tools">
+        <div class="lockin-sticky-note__swatches" role="group" aria-label="Sticky note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-lockin-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+        </div>
+        <label class="lockin-sticky-note__custom">Custom<input id="lockin-note-color" type="color" value="${color}" aria-label="Choose a custom sticky note color"></label>
+      </div>
+      <div class="lockin-note-actions">
+        <button type="button" class="btn-secondary btn-sm" id="lockin-pin-note-btn">${state.preferences.floatingSessionNote ? "Unpin note" : "Pin note"}</button>
+        <button type="button" class="btn-secondary btn-sm" id="lockin-save-note-btn">${savedNote ? "Update Sticky Notes" : "Save to Sticky Notes"}</button>
+      </div>
+      <p class="lockin-note-hint text-muted">Unsaved notes disappear when this session ends.</p>
+    </section>
+  `;
+}
+
+function updateLockInNoteColor(color) {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return;
+  const active = getActiveLockIn();
+  if (!active) return;
+  active.sessionNoteColor = color;
+  const note = document.querySelector(".lockin-sticky-note");
+  if (note) {
+    note.style.setProperty("--lockin-note-color", color);
+    note.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  }
+  document.querySelectorAll("[data-lockin-note-color]").forEach((button) => {
+    const selected = button.dataset.lockinNoteColor === color;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  const colorInput = document.getElementById("lockin-note-color");
+  if (colorInput) colorInput.value = color;
+  const savedLabel = document.getElementById("lockin-note-saved");
+  if (savedLabel && active.savedNoteId) savedLabel.textContent = "Session changes not saved to Sticky Notes";
+  const floatingNote = document.querySelector(".floating-widget--note");
+  if (floatingNote && state.preferences.floatingSessionNote) {
+    floatingNote.style.setProperty("--lockin-note-color", color);
+    floatingNote.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  }
+  saveState();
+}
+
+function saveLockInNoteToLibrary() {
+  const active = getActiveLockIn();
+  if (!active) return;
+  const content = (active.sessionNote || "").trim();
+  if (!content) {
+    showToast("Add a thought to the note before saving it.");
+    return;
+  }
+
+  const existing = active.savedNoteId
+    ? state.notes.find((note) => note.id === active.savedNoteId)
+    : null;
+  const now = new Date().toISOString();
+  if (existing) {
+    existing.title = active.title.slice(0, 80);
+    existing.content = content.slice(0, 2000);
+    existing.color = active.sessionNoteColor || "#fff1a8";
+    existing.updatedAt = now;
+  } else {
+    const note = {
+      id: generateId(),
+      title: active.title.slice(0, 80),
+      content: content.slice(0, 2000),
+      color: active.sessionNoteColor || "#fff1a8",
+      createdAt: now,
+      updatedAt: now,
+    };
+    state.notes.unshift(note);
+    active.savedNoteId = note.id;
+  }
+  const savedLabel = document.getElementById("lockin-note-saved");
+  if (savedLabel) savedLabel.textContent = "Saved to Sticky Notes";
+  const saveButton = document.getElementById("lockin-save-note-btn");
+  if (saveButton) saveButton.textContent = "Update Sticky Notes";
+  saveState();
+  renderFloatingWidgets();
+}
+
+function toggleLockInTimerPin() {
+  const active = getActiveLockIn();
+  if (!active) return;
+  state.preferences.floatingLockInTimer = !state.preferences.floatingLockInTimer;
+  saveState();
+  renderFloatingWidgets();
+  const button = document.getElementById("lockin-pin-timer-btn");
+  if (button) button.textContent = state.preferences.floatingLockInTimer ? "Unpin timer" : "Pin timer";
+}
+
+function toggleLockInNotePin() {
+  if (!getActiveLockIn()) return;
+  state.preferences.floatingSessionNote = !state.preferences.floatingSessionNote;
+  if (state.preferences.floatingSessionNote) state.preferences.floatingNoteId = null;
+  saveState();
+  renderFloatingWidgets();
+  const button = document.getElementById("lockin-pin-note-btn");
+  if (button) button.textContent = state.preferences.floatingSessionNote ? "Unpin note" : "Pin note";
+}
+
+function renderFloatingWidgets() {
+  const host = document.getElementById("questify-floating-widgets");
+  if (!host) return;
+  if (["consent", "login"].includes(currentView) || !isOnboarded()) {
+    host.innerHTML = "";
+    return;
+  }
+  const active = getActiveLockIn();
+  const timer = state.preferences.floatingLockInTimer && active
+    ? `<section class="floating-widget floating-widget--timer" data-floating-widget="timer" style="${getFloatingWidgetPositionStyle(state.preferences.floatingTimerPosition, 84)}" aria-label="Pinned Lock In timer">
+        <header class="floating-widget__header" data-floating-drag-handle>
+          <strong>🔒 ${escapeHTML(active.title)}</strong>
+          <button type="button" class="floating-widget__close" data-floating-unpin="timer" aria-label="Unpin timer">×</button>
+        </header>
+        <p class="floating-widget__timer" id="floating-lockin-timer">--:--</p>
+        <div class="floating-widget__actions">
+          <button type="button" class="btn-secondary btn-sm" data-floating-timer-action="pause">${active.isPaused ? "Resume" : "Pause"}</button>
+          <button type="button" class="btn-secondary btn-sm" data-floating-timer-action="focus">Focus</button>
+        </div>
+      </section>`
+    : "";
+  const note = getPinnedFloatingNote();
+  const supportsNotePictureInPicture = "documentPictureInPicture" in window &&
+    typeof window.documentPictureInPicture?.requestWindow === "function";
+  const noteWidget = note
+    ? `<section class="floating-widget floating-widget--note" data-floating-widget="note" style="--lockin-note-color:${note.color};--lockin-note-ink:${getLockInNoteInk(note.color)};${getFloatingWidgetPositionStyle(state.preferences.floatingNotePosition, 220)}" aria-label="Pinned sticky note">
+        <header class="floating-widget__header" data-floating-drag-handle>
+          <strong>${escapeHTML(note.title)}</strong>
+          <button type="button" class="floating-widget__close" data-floating-unpin="note" aria-label="Unpin note">×</button>
+        </header>
+        <textarea data-floating-note-content="${escapeAttribute(note.id)}" maxlength="${note.isSession ? 500 : 2000}" aria-label="Pinned note content" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+        <div class="floating-widget__actions">
+          <button type="button" class="btn-secondary btn-sm" data-floating-note-pip="${escapeAttribute(note.id)}" ${supportsNotePictureInPicture ? "" : "disabled"} title="${supportsNotePictureInPicture ? "Float this note above other apps where supported" : "Your browser does not support floating Picture-in-Picture"}">Float note</button>
+          ${note.isSession ? `<button type="button" class="btn-secondary btn-sm" id="floating-save-session-note">Save to Sticky Notes</button>` : ""}
+        </div>
+      </section>`
+    : "";
+  host.innerHTML = `${timer}${noteWidget}`;
+  clampFloatingWidgetsToViewport();
+  updateFloatingTimerDisplay();
+  attachFloatingWidgetHandlers();
+}
+
+function getPinnedFloatingNote() {
+  const active = getActiveLockIn();
+  if (state.preferences.floatingSessionNote && active) {
+    return {
+      id: active.id,
+      title: active.title,
+      content: active.sessionNote || "",
+      color: /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
+        ? active.sessionNoteColor
+        : "#fff1a8",
+      isSession: true,
+    };
+  }
+  const saved = state.notes.find((note) => note.id === state.preferences.floatingNoteId);
+  return saved ? { ...saved, isSession: false } : null;
+}
+
+function getFloatingWidgetPositionStyle(position, fallbackTop) {
+  if (!position) return `right:12px;top:${fallbackTop}px`;
+  const widgetWidth = Math.min(280, Math.max(0, window.innerWidth - 20));
+  const x = Math.max(8, Math.min(window.innerWidth - widgetWidth - 8, position.x));
+  const y = Math.max(8, Math.min(window.innerHeight - 80, position.y));
+  return `left:${x}px;top:${y}px;right:auto`;
+}
+
+function clampFloatingWidgetsToViewport() {
+  let adjusted = false;
+  document.querySelectorAll("[data-floating-widget]").forEach((widget) => {
+    const positionKey = widget.dataset.floatingWidget === "timer"
+      ? "floatingTimerPosition"
+      : "floatingNotePosition";
+    const savedPosition = state.preferences[positionKey];
+    if (!savedPosition) return;
+    const rect = widget.getBoundingClientRect();
+    const x = Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left));
+    const y = Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top));
+    widget.style.left = `${x}px`;
+    widget.style.top = `${y}px`;
+    widget.style.right = "auto";
+    if (x !== savedPosition.x || y !== savedPosition.y) {
+      state.preferences[positionKey] = { x, y };
+      adjusted = true;
+    }
+  });
+  if (adjusted) saveState();
+}
+
+function updateFloatingTimerDisplay() {
+  const active = getActiveLockIn();
+  const timer = document.getElementById("floating-lockin-timer");
+  if (!active || !timer) return;
+  const elapsed = getLockInElapsedSeconds(active);
+  const remaining = Math.max(0, active.targetMinutes * 60 - elapsed);
+  timer.textContent = active.isPaused
+    ? `Paused · ${formatLockInClock(remaining)}`
+    : remaining > 0
+      ? `${formatLockInClock(remaining)} remaining`
+      : `${formatLockInClock(elapsed - active.targetMinutes * 60)} overtime`;
+  const pauseButton = document.querySelector('[data-floating-timer-action="pause"]');
+  if (pauseButton) pauseButton.textContent = active.isPaused ? "Resume" : "Pause";
+}
+
+function updateFloatingSessionNoteInput(value) {
+  const floatingInput = document.querySelector('[data-floating-note-content]');
+  if (floatingInput && document.activeElement !== floatingInput) floatingInput.value = value;
+}
+
+function updatePinnedNoteContent(noteId, rawValue) {
+  const active = getActiveLockIn();
+  if (state.preferences.floatingSessionNote && active?.id === noteId) {
+    active.sessionNote = rawValue.slice(0, 500);
+  } else {
+    const note = state.notes.find((item) => item.id === noteId);
+    if (!note) return false;
+    note.content = rawValue.slice(0, 2000);
+    note.updatedAt = new Date().toISOString();
+    const libraryInput = [...document.querySelectorAll("[data-note-content]")]
+      .find((element) => element.dataset.noteContent === noteId);
+    if (libraryInput && document.activeElement !== libraryInput) libraryInput.value = note.content;
+  }
+  saveState();
+  const noteInput = document.getElementById("lockin-note-input");
+  if (noteInput && state.preferences.floatingSessionNote && document.activeElement !== noteInput) {
+    noteInput.value = active.sessionNote;
+  }
+  return true;
+}
+
+function syncSessionNoteInput() {
+  const active = getActiveLockIn();
+  const input = document.getElementById("lockin-note-input");
+  if (input && document.activeElement !== input) input.value = active?.sessionNote || "";
+}
+
+function attachFloatingWidgetHandlers() {
+  document.querySelectorAll("[data-floating-widget]").forEach((widget) => {
+    const handle = widget.querySelector("[data-floating-drag-handle]");
+    if (handle) {
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.target.closest("button")) return;
+        const rect = widget.getBoundingClientRect();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const startLeft = rect.left;
+        const startTop = rect.top;
+        handle.setPointerCapture(event.pointerId);
+        const move = (moveEvent) => {
+          const x = Math.max(8, Math.min(window.innerWidth - widget.offsetWidth - 8, startLeft + moveEvent.clientX - startX));
+          const y = Math.max(8, Math.min(window.innerHeight - widget.offsetHeight - 8, startTop + moveEvent.clientY - startY));
+          widget.style.left = `${x}px`;
+          widget.style.top = `${y}px`;
+          widget.style.right = "auto";
+        };
+        const end = (endEvent) => {
+          if (handle.hasPointerCapture(endEvent.pointerId)) handle.releasePointerCapture(endEvent.pointerId);
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", end);
+          handle.removeEventListener("pointercancel", end);
+          const positionKey = widget.dataset.floatingWidget === "timer"
+            ? "floatingTimerPosition"
+            : "floatingNotePosition";
+          state.preferences[positionKey] = {
+            x: parseFloat(widget.style.left) || 0,
+            y: parseFloat(widget.style.top) || 0,
+          };
+          saveState();
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", end);
+        handle.addEventListener("pointercancel", end);
+      });
+    }
+
+    widget.querySelector("[data-floating-unpin]")?.addEventListener("click", () => {
+      if (widget.dataset.floatingWidget === "timer") {
+        state.preferences.floatingLockInTimer = false;
+      } else {
+        state.preferences.floatingSessionNote = false;
+        state.preferences.floatingNoteId = null;
+      }
+      saveState();
+      renderFloatingWidgets();
+    });
+  });
+
+  document.querySelectorAll('[data-floating-timer-action="pause"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const active = getActiveLockIn();
+      if (!active) return;
+      active.isPaused ? resumeLockIn(active.id) : pauseLockIn(active.id);
+      updateLockInTimerDisplay();
+      updateFloatingTimerDisplay();
+    });
+  });
+  document.querySelectorAll('[data-floating-timer-action="focus"]').forEach((button) => {
+    button.addEventListener("click", openLockInFocusWindow);
+  });
+
+  document.querySelectorAll("[data-floating-note-content]").forEach((input) => {
+    input.addEventListener("input", () => {
+      updatePinnedNoteContent(input.dataset.floatingNoteContent, input.value);
+    });
+  });
+  document.querySelectorAll("[data-floating-note-pip]").forEach((button) => {
+    button.addEventListener("click", () => openPinnedNotePictureInPicture(button.dataset.floatingNotePip));
+  });
+  document.getElementById("floating-save-session-note")?.addEventListener("click", saveLockInNoteToLibrary);
+}
+
+function openLockInFocusWindow() {
+  const focusUrl = new URL(window.location.href);
+  focusUrl.searchParams.set("focus", "lockin");
+  focusUrl.hash = "";
+  const focusWindow = window.open(
+    focusUrl.toString(),
+    "questify-lockin-focus",
+    "popup=yes,width=420,height=780,resizable=yes,scrollbars=yes"
+  );
+  if (!focusWindow) {
+    showToast("Allow pop-ups to open the Lock In focus window.");
+    return;
+  }
+  focusWindow.focus();
+}
+
+function renderLockInFocusWindow() {
+  const supportsPictureInPicture = "documentPictureInPicture" in window &&
+    typeof window.documentPictureInPicture?.requestWindow === "function";
+  const hasActiveSession = Boolean(getActiveLockIn());
+  return `
+    <section class="lockin-focus-window" aria-labelledby="lockin-focus-window-title">
+      <header class="lockin-focus-window__header">
+        <div class="lockin-focus-window__brand">
+          <img src="logo.svg" alt="" width="30" height="30">
+          <div><p class="dashboard-section__eyebrow">FOCUS SPACE</p><h1 id="lockin-focus-window-title">Questify Lock In</h1></div>
+        </div>
+        <button type="button" id="lockin-focus-window-close" class="btn-secondary btn-sm">Close</button>
+      </header>
+      ${renderLockInPanel()}
+      <div class="lockin-focus-window__pip">
+        ${supportsPictureInPicture && hasActiveSession
+          ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary">Keep on top</button>
+             <p id="lockin-picture-in-picture-status" class="text-muted">Optional floating timer; availability depends on your browser.</p>`
+          : supportsPictureInPicture
+          ? `<p class="text-muted">Start a focus session to enable the floating timer.</p>`
+          : `<p class="text-muted">This browser cannot keep a web window above other apps. The Lock In timer remains open here.</p>`}
+      </div>
+    </section>
+  `;
+}
+
+function updateLockInPictureInPicture(active, elapsedSec) {
+  if (!lockInPictureInPictureWindow || lockInPictureInPictureWindow.closed) return;
+  const title = lockInPictureInPictureWindow.document.getElementById("lockin-pip-title");
+  const timer = lockInPictureInPictureWindow.document.getElementById("lockin-pip-timer");
+  const progress = lockInPictureInPictureWindow.document.getElementById("lockin-pip-progress");
+  const note = lockInPictureInPictureWindow.document.getElementById("lockin-pip-note");
+  if (title) title.textContent = active.title;
+  if (timer) {
+    const remaining = Math.max(0, active.targetMinutes * 60 - elapsedSec);
+    timer.textContent = active.isPaused
+      ? `Paused · ${formatLockInClock(remaining)}`
+      : remaining > 0
+      ? `${formatLockInClock(remaining)} remaining`
+      : `${formatLockInClock(elapsedSec - active.targetMinutes * 60)} overtime`;
+  }
+  if (progress) progress.style.width = `${Math.min(100, (elapsedSec / (active.targetMinutes * 60)) * 100)}%`;
+  if (note) note.textContent = active.sessionNote || "Your focus note will appear here.";
+}
+
+function closeLockInPictureInPicture() {
+  if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
+  lockInPictureInPictureInterval = null;
+  lockInPictureInPictureWindow?.close();
+  lockInPictureInPictureWindow = null;
+}
+
+function updateStickyNotePictureInPicture() {
+  const pipWindow = stickyNotePictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed) return;
+  const note = getPinnedFloatingNote();
+  if (!note || note.id !== stickyNotePictureInPictureNoteId) {
+    closeStickyNotePictureInPicture();
+    return;
+  }
+  const title = pipWindow.document.getElementById("sticky-note-pip-title");
+  const content = pipWindow.document.getElementById("sticky-note-pip-content");
+  if (title) title.textContent = note.title || "Sticky note";
+  if (content && pipWindow.document.activeElement !== content) content.value = note.content;
+  pipWindow.document.body.style.setProperty("--lockin-note-color", note.color);
+  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(note.color));
+  if (content) content.maxLength = note.isSession ? 500 : 2000;
+}
+
+function closeStickyNotePictureInPicture() {
+  const pipWindow = stickyNotePictureInPictureWindow;
+  stickyNotePictureInPictureWindow = null;
+  stickyNotePictureInPictureNoteId = null;
+  if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
+  stickyNotePictureInPictureInterval = null;
+  if (pipWindow && !pipWindow.closed) pipWindow.close();
+}
+
+async function openPinnedNotePictureInPicture(noteId) {
+  if (!window.documentPictureInPicture?.requestWindow) {
+    showToast("Floating notes aren't supported in this browser; the note remains pinned in Questify.");
+    return;
+  }
+  const note = getPinnedFloatingNote();
+  if (!note || note.id !== noteId) {
+    showToast("Pin a note in Questify before floating it.");
+    return;
+  }
+
+  try {
+    closeLockInPictureInPicture();
+    closeStickyNotePictureInPicture();
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 340, height: 280 });
+    stickyNotePictureInPictureWindow = pipWindow;
+    stickyNotePictureInPictureNoteId = noteId;
+    pipWindow.document.title = note.title || "Questify Sticky Note";
+    pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+    const stylesheet = pipWindow.document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = new URL("style.css", window.location.href).href;
+    pipWindow.document.head.append(stylesheet);
+    pipWindow.document.body.classList.add("sticky-note-pip-host");
+    pipWindow.document.body.style.setProperty("--lockin-note-color", note.color);
+    pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(note.color));
+    pipWindow.document.body.innerHTML = `
+      <main class="sticky-note-pip">
+        <header><strong id="sticky-note-pip-title"></strong><button type="button" id="sticky-note-pip-close" aria-label="Close floating note">×</button></header>
+        <textarea id="sticky-note-pip-content" aria-label="Sticky note content" placeholder="Write a thought…"></textarea>
+        <p>Floating note · close this window to return to Questify</p>
+      </main>
+    `;
+    const content = pipWindow.document.getElementById("sticky-note-pip-content");
+    if (content) {
+      content.maxLength = note.isSession ? 500 : 2000;
+      content.addEventListener("input", () => updatePinnedNoteContent(noteId, content.value));
+    }
+    pipWindow.document.getElementById("sticky-note-pip-close")?.addEventListener("click", closeStickyNotePictureInPicture);
+    pipWindow.addEventListener("pagehide", () => {
+      if (stickyNotePictureInPictureWindow !== pipWindow) return;
+      stickyNotePictureInPictureWindow = null;
+      stickyNotePictureInPictureNoteId = null;
+      if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
+      stickyNotePictureInPictureInterval = null;
+    }, { once: true });
+    if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
+    updateStickyNotePictureInPicture();
+    stickyNotePictureInPictureInterval = setInterval(updateStickyNotePictureInPicture, 500);
+  } catch (error) {
+    console.error("Could not open sticky note Picture-in-Picture:", error);
+    closeStickyNotePictureInPicture();
+    const button = document.querySelector(`[data-floating-note-pip="${noteId}"]`);
+    if (button) {
+      button.disabled = true;
+      button.title = "Floating mode could not open in this browser window.";
+    }
+    showToast("This browser couldn't open a floating note. It remains pinned in Questify.");
+  }
+}
+
+async function openLockInPictureInPicture() {
+  const status = document.getElementById("lockin-picture-in-picture-status");
+  try {
+    closeStickyNotePictureInPicture();
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 320, height: 190 });
+    lockInPictureInPictureWindow = pipWindow;
+    pipWindow.document.title = "Questify Lock In";
+    pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+    const stylesheet = pipWindow.document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = new URL("style.css", window.location.href).href;
+    pipWindow.document.head.append(stylesheet);
+    pipWindow.document.body.classList.add("lockin-pip-host");
+    pipWindow.document.body.innerHTML = `
+      <main class="lockin-pip">
+        <p class="dashboard-section__eyebrow">QUESTIFY LOCK IN</p>
+        <strong id="lockin-pip-title"></strong>
+        <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
+        <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
+        <p id="lockin-pip-note" class="lockin-pip__note"></p>
+      </main>
+    `;
+    pipWindow.addEventListener("pagehide", () => {
+      lockInPictureInPictureWindow = null;
+      if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
+      lockInPictureInPictureInterval = null;
+    }, { once: true });
+    if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
+    lockInPictureInPictureInterval = setInterval(() => {
+      const active = getActiveLockIn();
+      if (!active) {
+        pipWindow.close();
+        return;
+      }
+      updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
+    }, 1000);
+    const active = getActiveLockIn();
+    if (active) updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
+    if (status) status.textContent = "Floating timer is open; close it in the PiP window.";
+  } catch (error) {
+    console.error("Could not open Lock In Picture-in-Picture:", error);
+    if (status) status.textContent = "Picture-in-Picture could not open. Keep using this focus window.";
+    const button = document.getElementById("lockin-picture-in-picture-btn");
+    if (button) {
+      button.disabled = true;
+      button.title = "Floating mode could not open in this browser window.";
+    }
+  }
+}
+
 function renderLockInPanel() {
   const active = getActiveLockIn();
 
@@ -3934,7 +4671,11 @@ function renderLockInPanel() {
       <div class="card lockin-panel lockin-panel--active" id="lockin-panel">
         <div class="lockin-panel__header">
           <span class="lockin-panel__badge">🔒 Lock In</span>
-          <span id="lockin-status" class="lockin-status">Locked in...</span>
+          <div class="lockin-panel__header-tools">
+            <span id="lockin-status" class="lockin-status">Locked in...</span>
+            <button type="button" class="btn-secondary btn-sm" id="lockin-pin-timer-btn">${state.preferences.floatingLockInTimer ? "Unpin timer" : "Pin timer"}</button>
+            <button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>
+          </div>
         </div>
         <h3 class="lockin-panel__title">${escapeHTML(active.title)}</h3>
         <div class="lockin-focus-clock">
@@ -3950,7 +4691,7 @@ function renderLockInPanel() {
         <div class="lockin-focus-controls">
           <div class="lockin-focus-controls__copy">
             <strong>Quiet focus</strong>
-            <span class="text-muted">Mute Questify toasts, its notification log, and browser reminders. Other apps and OS alerts are unchanged.</span>
+            <span class="text-muted">Mute new Questify toasts, notification-log entries, and browser reminders for this session. Alerts already delivered cannot be recalled; other apps and OS alerts are unchanged.</span>
           </div>
           <div
             id="lockin-notifications-switch"
@@ -3975,6 +4716,7 @@ function renderLockInPanel() {
           <button id="lockin-finish-btn" class="btn btn-sm" data-id="${active.id}">Finish Session</button>
           <button id="lockin-cancel-btn" class="btn-secondary btn-sm" data-id="${active.id}">Cancel</button>
         </div>
+        ${renderLockInStickyNote()}
       </div>
     `;
   }
@@ -3983,6 +4725,7 @@ function renderLockInPanel() {
     <div class="card lockin-panel" id="lockin-panel">
       <div class="lockin-panel__header">
         <span class="lockin-panel__badge">🔒 Lock In</span>
+        <button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>
       </div>
       <p class="text-muted lockin-panel__description">
         Choose your focus duration and whether Questify should hold its own alerts. Your selected duration is remembered.
@@ -4042,7 +4785,7 @@ function renderLockInPanel() {
         <div class="lockin-start-quiet">
           <label for="lockin-start-quiet-input">
             <input id="lockin-start-quiet-input" type="checkbox" ${state.preferences.blockNotificationsDuringLockIn ? "checked" : ""}>
-            <span><strong>Mute Questify notifications</strong><small>Suppresses Questify toasts, its notification log, and browser reminders for this session only.</small></span>
+            <span><strong>Mute Questify notifications</strong><small>Suppresses new Questify toasts, notification-log entries, and browser reminders for this session only. It cannot recall alerts already delivered.</small></span>
           </label>
           <details class="focus-os-guidance">
             <summary>Silence notifications from other apps</summary>
@@ -4052,6 +4795,7 @@ function renderLockInPanel() {
         <button type="submit" class="btn lockin-start-form__submit">Start focus session</button>
       </form>
       <p class="error-text" id="lockin-error"></p>
+      ${renderLockInStickyNote()}
     </div>
   `;
 }
@@ -4297,6 +5041,177 @@ function isCurrentPolicyAccepted() {
     Boolean(state.legalAcceptance.acceptedAt);
 }
 
+let confirmingNoteDeleteId = null;
+
+function renderStickyNotesPage() {
+  const notes = [...state.notes].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return `
+    <section class="sticky-notes-page" aria-labelledby="sticky-notes-title">
+      <header class="view-heading sticky-notes-heading">
+        <div>
+          <p class="dashboard-section__eyebrow">YOUR THOUGHTS, IN ONE PLACE</p>
+          <h1 id="sticky-notes-title">Sticky Notes</h1>
+          <p class="text-muted">Capture quick ideas, color-code them, and pin one above any Questify page. Supported desktop browsers can also float a pinned note above other apps.</p>
+        </div>
+        <button type="button" class="btn" id="create-sticky-note">＋ New note</button>
+      </header>
+      ${notes.length
+        ? `<div class="sticky-notes-grid">${notes.map((note) => renderStickyNoteCard(note)).join("")}</div>`
+        : `<div class="card sticky-notes-empty">
+            <span class="sticky-notes-empty__icon" aria-hidden="true">▤</span>
+            <h2>Your note space is clear</h2>
+            <p class="text-muted">Create a note for ideas you want to keep after your focus session ends.</p>
+            <button type="button" class="btn" data-create-first-note>Create your first note</button>
+          </div>`
+      }
+    </section>
+  `;
+}
+
+function renderStickyNoteCard(note) {
+  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  const isPinned = state.preferences.floatingNoteId === note.id;
+  const confirmingDelete = confirmingNoteDeleteId === note.id;
+  return `
+    <article class="sticky-note-card ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+      <div class="sticky-note-card__header">
+        <span class="sticky-note-card__pin-indicator">${isPinned ? "Pinned on screen" : "Sticky note"}</span>
+        <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
+      </div>
+      <label class="sr-only" for="note-title-${escapeAttribute(note.id)}">Note title</label>
+      <input id="note-title-${escapeAttribute(note.id)}" class="sticky-note-card__title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" data-note-title="${escapeAttribute(note.id)}" aria-label="Note title">
+      <label class="sr-only" for="note-content-${escapeAttribute(note.id)}">Note content</label>
+      <textarea id="note-content-${escapeAttribute(note.id)}" data-note-content="${escapeAttribute(note.id)}" maxlength="2000" rows="5" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+      <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+        ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+          <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-note-color-id="${escapeAttribute(note.id)}" data-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+        `).join("")}
+        <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
+      </div>
+      <div class="sticky-note-card__actions">
+        <button type="button" class="btn-secondary btn-sm" data-note-pin="${escapeAttribute(note.id)}">${isPinned ? "Unpin" : "Pin on screen"}</button>
+        ${confirmingDelete
+          ? `<span class="sticky-note-card__confirm">Delete this note?</span>
+             <button type="button" class="btn-delete btn-sm" data-note-delete-confirm="${escapeAttribute(note.id)}">Delete</button>
+             <button type="button" class="btn-secondary btn-sm" data-note-delete-cancel>Keep</button>`
+          : `<button type="button" class="btn-delete btn-sm" data-note-delete="${escapeAttribute(note.id)}">Delete</button>`
+        }
+      </div>
+    </article>
+  `;
+}
+
+function attachStickyNotesHandlers() {
+  const createNote = () => {
+    const now = new Date().toISOString();
+    const note = {
+      id: generateId(),
+      title: "New note",
+      content: "",
+      color: getRandomLockInNoteColor(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    state.notes.unshift(note);
+    confirmingNoteDeleteId = null;
+    saveState();
+    renderView();
+    document.querySelector(`[data-note-title="${note.id}"]`)?.focus();
+  };
+  document.getElementById("create-sticky-note")?.addEventListener("click", createNote);
+  document.querySelector("[data-create-first-note]")?.addEventListener("click", createNote);
+
+  document.querySelectorAll("[data-note-title], [data-note-content]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const note = state.notes.find((item) => item.id === input.dataset.noteTitle || item.id === input.dataset.noteContent);
+      if (!note) return;
+      if (input.hasAttribute("data-note-title")) note.title = input.value.slice(0, 80);
+      else note.content = input.value.slice(0, 2000);
+      note.updatedAt = new Date().toISOString();
+      const card = input.closest("[data-note-card]");
+      const updatedLabel = card?.querySelector(".sticky-note-card__updated");
+      if (updatedLabel) updatedLabel.textContent = "just now";
+      saveState();
+      updateFloatingSavedNote(note);
+    });
+  });
+
+  document.querySelectorAll("[data-note-color-id]").forEach((button) => {
+    button.addEventListener("click", () => updateStickyNoteColor(button.dataset.noteColorId, button.dataset.noteColor));
+  });
+  document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
+    input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
+  });
+  document.querySelectorAll("[data-note-pin]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.preferences.floatingNoteId = state.preferences.floatingNoteId === button.dataset.notePin
+        ? null
+        : button.dataset.notePin;
+      state.preferences.floatingSessionNote = false;
+      saveState();
+      renderView();
+    });
+  });
+  document.querySelectorAll("[data-note-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      confirmingNoteDeleteId = button.dataset.noteDelete;
+      renderView();
+    });
+  });
+  document.querySelectorAll("[data-note-delete-confirm]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.noteDeleteConfirm;
+      state.notes = state.notes.filter((note) => note.id !== id);
+      if (state.preferences.floatingNoteId === id) state.preferences.floatingNoteId = null;
+      confirmingNoteDeleteId = null;
+      saveState();
+      renderView();
+    });
+  });
+  document.querySelectorAll("[data-note-delete-cancel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      confirmingNoteDeleteId = null;
+      renderView();
+    });
+  });
+}
+
+function updateStickyNoteColor(id, color) {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return;
+  const note = state.notes.find((item) => item.id === id);
+  if (!note) return;
+  note.color = color;
+  note.updatedAt = new Date().toISOString();
+  saveState();
+  const card = [...document.querySelectorAll("[data-note-card]")]
+    .find((element) => element.dataset.noteCard === id);
+  if (card) {
+    card.style.setProperty("--lockin-note-color", color);
+    card.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+    card.querySelectorAll("[data-note-color-id]").forEach((button) => {
+      const selected = button.dataset.noteColor === color;
+      button.classList.toggle("is-selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    const colorInput = card.querySelector("[data-note-custom-color]");
+    if (colorInput) colorInput.value = color;
+  }
+  const floating = document.querySelector(".floating-widget--note");
+  if (floating && state.preferences.floatingNoteId === id) {
+    floating.style.setProperty("--lockin-note-color", color);
+    floating.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  }
+}
+
+function updateFloatingSavedNote(note) {
+  const floating = document.querySelector(".floating-widget--note");
+  if (!floating || state.preferences.floatingNoteId !== note.id) return;
+  const title = floating.querySelector(".floating-widget__header strong");
+  const textarea = floating.querySelector("[data-floating-note-content]");
+  if (title && document.activeElement !== title) title.textContent = note.title || "Untitled note";
+  if (textarea && document.activeElement !== textarea) textarea.value = note.content;
+}
+
 // -------------------------------------
 // View registry
 // -------------------------------------
@@ -4347,6 +5262,7 @@ const views = {
       </div>
     </div>
   `,
+  notes: () => renderStickyNotesPage(),
   dashboard: () => `
     <section class="dashboard-hero">
       <div class="dashboard-greeting">
@@ -5177,8 +6093,9 @@ function attachHabitHandlers() {
       const input = document.getElementById("add-habit-input");
       const descriptionInput = document.getElementById("add-habit-description");
       const difficultyInput = document.getElementById("add-habit-difficulty");
+      const categoryInput = document.getElementById("add-habit-category");
       const error = document.getElementById("add-habit-error");
-      const result = addHabit(input.value, descriptionInput.value, difficultyInput.value);
+      const result = addHabit(input.value, descriptionInput.value, difficultyInput.value, categoryInput.value);
       if (!result.ok) {
         error.textContent = result.error;
         input.classList.add("input-error");
@@ -5197,7 +6114,8 @@ function attachHabitHandlers() {
         editForm.dataset.habitEditForm,
         String(formData.get("title") || ""),
         String(formData.get("description") || ""),
-        String(formData.get("difficulty") || "medium")
+        String(formData.get("difficulty") || "medium"),
+        String(formData.get("category") || "general")
       );
       if (!result.ok) {
         editForm.querySelector("[data-habit-edit-error]").textContent = result.error;
@@ -5357,6 +6275,46 @@ function attachCalendarHandlers() {
 // Wire up the challenges view after it's rendered
 // -------------------------------------
 function attachChallengesHandlers() {
+  document.querySelectorAll(".lockin-open-window-btn").forEach((button) => {
+    button.addEventListener("click", openLockInFocusWindow);
+  });
+
+  const lockInNoteInput = document.getElementById("lockin-note-input");
+  if (lockInNoteInput) {
+    lockInNoteInput.addEventListener("input", () => {
+      const active = getActiveLockIn();
+      if (!active) return;
+      active.sessionNote = lockInNoteInput.value.slice(0, 500);
+      const savedLabel = document.getElementById("lockin-note-saved");
+      if (savedLabel) savedLabel.textContent = active.savedNoteId
+        ? "Session changes not saved to Sticky Notes"
+        : "Session only";
+      saveState();
+      updateFloatingSessionNoteInput(lockInNoteInput.value);
+    });
+  }
+  document.getElementById("lockin-pin-timer-btn")?.addEventListener("click", toggleLockInTimerPin);
+  document.getElementById("lockin-pin-note-btn")?.addEventListener("click", toggleLockInNotePin);
+  document.getElementById("lockin-save-note-btn")?.addEventListener("click", saveLockInNoteToLibrary);
+  document.querySelectorAll("[data-lockin-note-color]").forEach((button) => {
+    button.addEventListener("click", () => updateLockInNoteColor(button.dataset.lockinNoteColor));
+  });
+  document.getElementById("lockin-note-color")?.addEventListener("input", (event) => {
+    updateLockInNoteColor(event.currentTarget.value);
+  });
+
+  document.getElementById("lockin-focus-window-close")?.addEventListener("click", () => {
+    if (window.opener && !window.opener.closed) {
+      window.close();
+      return;
+    }
+    const appUrl = new URL(window.location.href);
+    appUrl.searchParams.delete("focus");
+    appUrl.hash = "";
+    window.location.replace(appUrl.toString());
+  });
+  document.getElementById("lockin-picture-in-picture-btn")?.addEventListener("click", openLockInPictureInPicture);
+
   const quietFocusSwitch = document.getElementById("lockin-notifications-switch");
   if (quietFocusSwitch) {
     const toggleQuietFocus = () => {
@@ -5642,20 +6600,28 @@ function initPullToRefresh() {
   const label = document.getElementById("pull-refresh-label");
   if (!indicator || !label) return;
 
-  const refreshThreshold = 68;
+  const ring = indicator.querySelector(".pull-refresh-indicator__ring");
+  const refreshThreshold = 52;
+  const ringCircumference = 182;
   let startY = null;
   let pullDistance = 0;
   let isRefreshing = false;
 
-  const canStartPull = (target, y) => (
+  const canStartPull = (target) => (
     !isRefreshing &&
-    window.scrollY <= 0 &&
-    y <= 72 &&
+    window.scrollY <= 1 &&
     !target.closest("button, a, input, textarea, select, [contenteditable='true']")
   );
 
   const updateIndicator = (distance) => {
-    pullDistance = Math.min(92, Math.max(0, (distance - 5) * 0.58));
+    pullDistance = Math.min(88, Math.max(0, (distance - 4) * 0.72));
+    indicator.style.setProperty("--indicator-offset", `${Math.min(32, pullDistance * 0.5)}px`);
+    document.body.style.setProperty("--refresh-content-shift", `${pullDistance * 0.72}px`);
+    document.body.classList.add("is-pulling-to-refresh");
+    ring?.style.setProperty(
+      "stroke-dasharray",
+      `${ringCircumference * Math.min(1, pullDistance / refreshThreshold)} ${ringCircumference}`
+    );
     indicator.style.setProperty("--pull-distance", `${pullDistance}px`);
     indicator.classList.add("is-pulling");
     indicator.classList.toggle("is-ready", pullDistance >= refreshThreshold);
@@ -5666,6 +6632,10 @@ function initPullToRefresh() {
   const resetIndicator = () => {
     indicator.classList.remove("is-pulling", "is-ready", "is-refreshing");
     indicator.style.removeProperty("--pull-distance");
+    indicator.style.removeProperty("--indicator-offset");
+    document.body.classList.remove("is-pulling-to-refresh");
+    document.body.style.removeProperty("--refresh-content-shift");
+    ring?.style.setProperty("stroke-dasharray", `0 ${ringCircumference}`);
     indicator.setAttribute("aria-hidden", "true");
     label.textContent = "Pull to refresh";
     startY = null;
@@ -5677,7 +6647,9 @@ function initPullToRefresh() {
     indicator.classList.remove("is-pulling", "is-ready");
     indicator.classList.add("is-refreshing");
     indicator.style.setProperty("--pull-distance", "76px");
-    label.textContent = "Refreshing Questify";
+    indicator.style.setProperty("--indicator-offset", "32px");
+    ring?.style.setProperty("stroke-dasharray", "52 130");
+    label.textContent = "Refreshing…";
     indicator.setAttribute("aria-hidden", "false");
 
     try {
@@ -5696,7 +6668,7 @@ function initPullToRefresh() {
       resetIndicator();
       return;
     }
-    if (!canStartPull(event.target, event.touches[0].clientY)) return;
+    if (!canStartPull(event.target)) return;
     startY = event.touches[0].clientY;
   }, { passive: true });
 
@@ -5949,6 +6921,16 @@ function renderView() {
     currentView = "login";
   }
 
+  if (isLockInFocusWindow && !["consent", "login"].includes(currentView)) {
+    document.body.classList.add("is-lockin-focus-window");
+    mainEl.innerHTML = `${renderLockInFocusWindow()}${renderLockInExitDialog()}`;
+    attachLockInExitDialogHandlers();
+    attachChallengesHandlers();
+    renderFloatingWidgets();
+    return;
+  }
+  document.body.classList.remove("is-lockin-focus-window");
+
   const renderFn = views[currentView];
 
   if (!renderFn) {
@@ -6000,6 +6982,13 @@ function renderView() {
     attachHabitHandlers();
   }
 
+  if (currentView === "notes") {
+    attachStickyNotesHandlers();
+  }
+
+  renderFloatingWidgets();
+  if (getActiveLockIn() && !lockInIntervalId) startLockInTicker();
+
   if (isTourActive) {
     attachTourHandlers();
   }
@@ -6018,7 +7007,7 @@ function updateActiveNavButton() {
       btn.removeAttribute("aria-current");
     }
   });
-  const activeMoreView = ["badges", "profile", "settings"].includes(currentView);
+  const activeMoreView = ["badges", "notes", "profile", "settings"].includes(currentView);
   const moreToggle = document.getElementById("nav-more-toggle");
   const nav = moreToggle?.closest(".app-nav");
   const secondaryNav = nav?.querySelector(".app-nav-secondary");
@@ -6039,15 +7028,27 @@ function applyNavigationLayout() {
   const effectiveMode = requestedMode === "auto"
     ? (window.matchMedia("(min-width: 768px)").matches ? "sidebar" : "bottom")
     : requestedMode;
+  const isMobileSidebar = effectiveMode === "sidebar" && window.matchMedia("(max-width: 767px)").matches;
+  if (!isMobileSidebar) {
+    isMobileNavigationOpen = false;
+  }
   document.body.classList.toggle("nav-layout-sidebar", effectiveMode === "sidebar");
   document.body.classList.toggle("nav-layout-bottom", effectiveMode === "bottom");
-  document.body.classList.toggle("is-nav-collapsed", effectiveMode === "sidebar" && isSidebarCollapsed);
+  document.body.classList.toggle("is-nav-collapsed", effectiveMode === "sidebar" && !isMobileSidebar && isSidebarCollapsed);
+  document.body.classList.toggle("is-mobile-nav-open", isMobileSidebar && isMobileNavigationOpen);
   const button = document.getElementById("sidebar-collapse-btn");
   if (button) {
-    button.setAttribute("aria-expanded", String(!isSidebarCollapsed));
-    button.setAttribute("aria-label", isSidebarCollapsed ? "Expand navigation" : "Collapse navigation");
-    button.title = isSidebarCollapsed ? "Expand navigation" : "Collapse navigation";
-    button.textContent = isSidebarCollapsed ? "›" : "‹";
+    if (isMobileSidebar) {
+      button.setAttribute("aria-expanded", String(isMobileNavigationOpen));
+      button.setAttribute("aria-label", isMobileNavigationOpen ? "Close navigation" : "Open navigation");
+      button.title = isMobileNavigationOpen ? "Close navigation" : "Open navigation";
+      button.textContent = isMobileNavigationOpen ? "×" : "☰";
+    } else {
+      button.setAttribute("aria-expanded", String(!isSidebarCollapsed));
+      button.setAttribute("aria-label", isSidebarCollapsed ? "Expand navigation" : "Collapse navigation");
+      button.title = isSidebarCollapsed ? "Expand navigation" : "Collapse navigation";
+      button.textContent = isSidebarCollapsed ? "›" : "‹";
+    }
   }
 }
 
@@ -6065,12 +7066,10 @@ function navigateTo(viewName, pushToHistory = true) {
     clearTourPositioning();
   }
 
-  if (currentView === "challenges" && destination !== "challenges") {
-    stopLockInTicker();
-  }
-
   document.querySelector(".app-nav")?.classList.remove("is-more-open");
   document.getElementById("nav-more-toggle")?.setAttribute("aria-expanded", "false");
+  isMobileNavigationOpen = false;
+  applyNavigationLayout();
   currentView = destination;
   isEditingName = false;
   searchQuery = "";
@@ -6107,6 +7106,12 @@ navButtons.forEach((btn) => {
 const sidebarCollapseButton = document.getElementById("sidebar-collapse-btn");
 if (sidebarCollapseButton) {
   sidebarCollapseButton.addEventListener("click", () => {
+    if (document.body.classList.contains("nav-layout-sidebar") &&
+        window.matchMedia("(max-width: 767px)").matches) {
+      isMobileNavigationOpen = !isMobileNavigationOpen;
+      applyNavigationLayout();
+      return;
+    }
     isSidebarCollapsed = !isSidebarCollapsed;
     state.preferences.sidebarCollapsed = isSidebarCollapsed;
     saveState();
@@ -6126,13 +7131,29 @@ if (navMoreToggle) {
 
 document.addEventListener("click", (event) => {
   const nav = document.querySelector(".app-nav");
-  if (!nav || nav.contains(event.target) || !nav.classList.contains("is-more-open")) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (document.body.classList.contains("is-mobile-nav-open") && !target?.closest(".app-header")) {
+    isMobileNavigationOpen = false;
+    applyNavigationLayout();
+  }
+  if (!nav || nav.contains(target) || !nav.classList.contains("is-more-open")) return;
   nav.classList.remove("is-more-open");
   navMoreToggle?.setAttribute("aria-expanded", "false");
   updateActiveNavButton();
 });
 
-window.addEventListener("resize", applyNavigationLayout);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.body.classList.contains("is-mobile-nav-open")) {
+    isMobileNavigationOpen = false;
+    applyNavigationLayout();
+    sidebarCollapseButton?.focus();
+  }
+});
+
+window.addEventListener("resize", () => {
+  applyNavigationLayout();
+  clampFloatingWidgetsToViewport();
+});
 
 // -------------------------------------
 // Handle browser back/forward buttons
@@ -6166,8 +7187,11 @@ function init() {
     return;
   }
 
-  initNotifBell();
-  checkDailyReminder();
+  if (isLockInFocusWindow) window.scrollTo(0, 0);
+  if (!isLockInFocusWindow) {
+    initNotifBell();
+    checkDailyReminder();
+  }
 
   const hashView = window.location.hash.replace("#", "");
   const startingView = getActiveLockIn()?.wasInterrupted

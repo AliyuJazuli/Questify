@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="ocean">
+<html lang="en" data-theme="sunset">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -36,7 +36,7 @@
   <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
   <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <meta name="theme-color" content="#071b2c">
+  <meta name="theme-color" content="#fff1e6">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Questify">
@@ -86,9 +86,9 @@
             <img src="logo.svg" alt="" class="app-header__icon" width="28" height="28">
             <span class="nav-label">Questify</span>
           </h1>
-          <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation">‹</button>
         </div>
-        <nav class="app-nav" aria-label="Main navigation">
+        <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-controls="main-nav" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation">‹</button>
+        <nav class="app-nav" id="main-nav" aria-label="Main navigation">
           <div class="app-nav-primary" aria-label="Primary destinations">
             <div class="app-nav-section" aria-label="Workspace">
               <span class="app-nav-section__label nav-label">Workspace</span>
@@ -103,6 +103,7 @@
               <div class="app-nav-section app-nav-section--more" aria-label="Progress">
                 <span class="app-nav-section__label nav-label">Progress</span>
                 <button class="app-nav__btn" data-view="badges" aria-label="Badges" title="Badges"><span class="nav-icon" aria-hidden="true">✦</span><span class="nav-label">Badges</span></button>
+                <button class="app-nav__btn" data-view="notes" aria-label="Sticky Notes" title="Sticky Notes"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Sticky Notes</span></button>
               </div>
               <div class="app-nav-section app-nav-section--more" aria-label="Account">
                 <span class="app-nav-section__label nav-label">Account</span>
@@ -139,6 +140,8 @@
     <main class="container app-main" id="main-content" tabindex="-1">
       <!-- Dynamic content will render here via JS -->
     </main>
+
+    <div id="questify-floating-widgets" aria-live="polite"></div>
 
     <footer class="app-footer">
       <div class="container app-footer__inner">

@@ -1,25 +1,15 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="ocean">
+<html lang="en" data-theme="sunset">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="index, follow">
   <meta name="description" content="Learn how Questify stores habit, challenge, and progress data, and how browser notifications work.">
   <link rel="canonical" href="https://questify-hydev.netlify.app/privacy.html">
-  <meta name="theme-color" content="#071b2c">
+  <meta name="theme-color" content="#fff1e6">
   <title>Privacy Policy — Questify</title>
   <link rel="stylesheet" href="style.css">
-  <script>
-    try {
-      const saved = JSON.parse(localStorage.getItem("questify_state") || "{}");
-      const theme = saved.preferences && saved.preferences.theme;
-      if (["ocean", "aurora", "forest", "sunset", "lavender", "midnight"].includes(theme)) {
-        document.documentElement.dataset.theme = theme;
-      }
-    } catch (error) {
-      console.error("Could not load the saved Questify theme for this document:", error);
-    }
-  </script>
+  <script src="legal-theme.js"></script>
 </head>
 <body>
   <main class="privacy-main">
@@ -37,14 +27,14 @@
 
       <section>
         <h2>Data stored on your device</h2>
-        <p>Questify is a static app with no account or Questify user-data backend. Your profile name, habits, challenges, check-ins, XP, badges, preferences, and notification history are saved in this browser's local storage. The app's offline files are cached by its service worker.</p>
+        <p>Questify is a static app with no account or Questify user-data backend. Your profile name, habits, challenges, check-ins, XP, badges, saved Sticky Notes, preferences (including pinned-widget positions), and notification history are saved in this browser's local storage. A Lock In note stays with its active session unless you save it to Sticky Notes. The app's offline files are cached by its service worker.</p>
         <p>This data stays in the browser storage on your device; it is not synchronized to Questify servers. Clearing this browser's site data removes the saved progress and offline cache. If you use multiple browsers or devices, your data does not automatically sync between them.</p>
       </section>
 
       <section>
         <h2>Browser notifications</h2>
         <p>Daily reminders are optional. Questify asks for browser notification permission only after you turn on Daily Reminders in Settings. When permission is granted, Questify may show up to one reminder per day when it checks for overdue or due-today challenges.</p>
-        <p>You can switch reminders off in Questify Settings or revoke the site's permission in your browser or device settings. Quiet focus can mute Questify alerts and reminders during a Lock In session; it does not silence other apps or system alerts. Browsers do not provide web apps permission to change system Do Not Disturb/Focus settings.</p>
+        <p>You can switch reminders off in Questify Settings or revoke the site's permission in your browser or device settings. Quiet focus suppresses new Questify toasts, notification-log entries, and browser reminders during a Lock In session; it cannot recall notifications already delivered. It does not silence other apps or system alerts. Browsers do not provide web apps permission to change system Do Not Disturb/Focus settings.</p>
       </section>
 
       <section>
