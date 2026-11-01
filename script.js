@@ -30,7 +30,10 @@ if (!appRoot || !mainEl) {
 // -------------------------------------
 const STORAGE_KEY = "questify_state";
 const LEGAL_POLICY_VERSION = "1.0";
-const isLockInFocusWindow = new URLSearchParams(window.location.search).get("focus") === "lockin";
+const initialUrlParams = new URLSearchParams(window.location.search);
+const isLockInFocusWindow = initialUrlParams.get("focus") === "lockin";
+const stickyNoteWindowId = initialUrlParams.get("note");
+const isStickyNoteWindow = Boolean(stickyNoteWindowId);
 const lockInStateChannel = "BroadcastChannel" in window
   ? new BroadcastChannel("questify-lockin-state")
   : null;
@@ -281,9 +284,6 @@ let isSidebarCollapsed = false;
 let isMobileNavigationOpen = false;
 let lockInPictureInPictureWindow = null;
 let lockInPictureInPictureInterval = null;
-let stickyNotePictureInPictureWindow = null;
-let stickyNotePictureInPictureInterval = null;
-let stickyNotePictureInPictureNoteId = null;
 
 function getLockInSyncSignature() {
   const active = getActiveLockIn();
@@ -303,6 +303,8 @@ function getNotesSyncSignature() {
     active?.sessionNote || "",
     active?.sessionNoteColor || "",
     active?.savedNoteId || "",
+    state.preferences.floatingNoteId || "",
+    state.preferences.floatingSessionNote || false,
   ]);
 }
 
@@ -319,7 +321,8 @@ function handleLockInStateSync() {
   const notesChanged = previousNotesSignature !== getNotesSyncSignature();
   if (!noteIsFocused && (
     isLockInFocusWindow ||
-    (sessionChanged && ["challenges", "dashboard"].includes(currentView)) ||
+    isStickyNoteWindow ||
+    (sessionChanged && ["challenges", "dashboard", "lockin"].includes(currentView)) ||
     (notesChanged && currentView === "notes")
   )) {
     renderView();
@@ -2494,7 +2497,7 @@ function initNotifBell() {
 // -------------------------------------
 function getFilteredChallenges() {
   const filtered = state.challenges
-    .filter((c) => !isRunningLockIn(c))
+    .filter((c) => !c.isLockIn)
     .filter((c) => {
     const matchesSearch = c.title.toLowerCase().includes(searchQuery.toLowerCase());
 
@@ -4268,8 +4271,6 @@ function renderFloatingWidgets() {
       </section>`
     : "";
   const note = getPinnedFloatingNote();
-  const supportsNotePictureInPicture = "documentPictureInPicture" in window &&
-    typeof window.documentPictureInPicture?.requestWindow === "function";
   const noteWidget = note
     ? `<section class="floating-widget floating-widget--note" data-floating-widget="note" style="--lockin-note-color:${note.color};--lockin-note-ink:${getLockInNoteInk(note.color)};${getFloatingWidgetPositionStyle(state.preferences.floatingNotePosition, 220)}" aria-label="Pinned sticky note">
         <header class="floating-widget__header" data-floating-drag-handle>
@@ -4277,10 +4278,7 @@ function renderFloatingWidgets() {
           <button type="button" class="floating-widget__close" data-floating-unpin="note" aria-label="Unpin note">×</button>
         </header>
         <textarea data-floating-note-content="${escapeAttribute(note.id)}" maxlength="${note.isSession ? 500 : 2000}" aria-label="Pinned note content" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
-        <div class="floating-widget__actions">
-          <button type="button" class="btn-secondary btn-sm" data-floating-note-pip="${escapeAttribute(note.id)}" ${supportsNotePictureInPicture ? "" : "disabled"} title="${supportsNotePictureInPicture ? "Float this note above other apps where supported" : "Your browser does not support floating Picture-in-Picture"}">Float note</button>
-          ${note.isSession ? `<button type="button" class="btn-secondary btn-sm" id="floating-save-session-note">Save to Sticky Notes</button>` : ""}
-        </div>
+        ${note.isSession ? `<button type="button" class="btn-secondary btn-sm" id="floating-save-session-note">Save to Sticky Notes</button>` : ""}
       </section>`
     : "";
   host.innerHTML = `${timer}${noteWidget}`;
@@ -4452,9 +4450,6 @@ function attachFloatingWidgetHandlers() {
       updatePinnedNoteContent(input.dataset.floatingNoteContent, input.value);
     });
   });
-  document.querySelectorAll("[data-floating-note-pip]").forEach((button) => {
-    button.addEventListener("click", () => openPinnedNotePictureInPicture(button.dataset.floatingNotePip));
-  });
   document.getElementById("floating-save-session-note")?.addEventListener("click", saveLockInNoteToLibrary);
 }
 
@@ -4526,97 +4521,9 @@ function closeLockInPictureInPicture() {
   lockInPictureInPictureWindow = null;
 }
 
-function updateStickyNotePictureInPicture() {
-  const pipWindow = stickyNotePictureInPictureWindow;
-  if (!pipWindow || pipWindow.closed) return;
-  const note = getPinnedFloatingNote();
-  if (!note || note.id !== stickyNotePictureInPictureNoteId) {
-    closeStickyNotePictureInPicture();
-    return;
-  }
-  const title = pipWindow.document.getElementById("sticky-note-pip-title");
-  const content = pipWindow.document.getElementById("sticky-note-pip-content");
-  if (title) title.textContent = note.title || "Sticky note";
-  if (content && pipWindow.document.activeElement !== content) content.value = note.content;
-  pipWindow.document.body.style.setProperty("--lockin-note-color", note.color);
-  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(note.color));
-  if (content) content.maxLength = note.isSession ? 500 : 2000;
-}
-
-function closeStickyNotePictureInPicture() {
-  const pipWindow = stickyNotePictureInPictureWindow;
-  stickyNotePictureInPictureWindow = null;
-  stickyNotePictureInPictureNoteId = null;
-  if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
-  stickyNotePictureInPictureInterval = null;
-  if (pipWindow && !pipWindow.closed) pipWindow.close();
-}
-
-async function openPinnedNotePictureInPicture(noteId) {
-  if (!window.documentPictureInPicture?.requestWindow) {
-    showToast("Floating notes aren't supported in this browser; the note remains pinned in Questify.");
-    return;
-  }
-  const note = getPinnedFloatingNote();
-  if (!note || note.id !== noteId) {
-    showToast("Pin a note in Questify before floating it.");
-    return;
-  }
-
-  try {
-    closeLockInPictureInPicture();
-    closeStickyNotePictureInPicture();
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 340, height: 280 });
-    stickyNotePictureInPictureWindow = pipWindow;
-    stickyNotePictureInPictureNoteId = noteId;
-    pipWindow.document.title = note.title || "Questify Sticky Note";
-    pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
-    const stylesheet = pipWindow.document.createElement("link");
-    stylesheet.rel = "stylesheet";
-    stylesheet.href = new URL("style.css", window.location.href).href;
-    pipWindow.document.head.append(stylesheet);
-    pipWindow.document.body.classList.add("sticky-note-pip-host");
-    pipWindow.document.body.style.setProperty("--lockin-note-color", note.color);
-    pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(note.color));
-    pipWindow.document.body.innerHTML = `
-      <main class="sticky-note-pip">
-        <header><strong id="sticky-note-pip-title"></strong><button type="button" id="sticky-note-pip-close" aria-label="Close floating note">×</button></header>
-        <textarea id="sticky-note-pip-content" aria-label="Sticky note content" placeholder="Write a thought…"></textarea>
-        <p>Floating note · close this window to return to Questify</p>
-      </main>
-    `;
-    const content = pipWindow.document.getElementById("sticky-note-pip-content");
-    if (content) {
-      content.maxLength = note.isSession ? 500 : 2000;
-      content.addEventListener("input", () => updatePinnedNoteContent(noteId, content.value));
-    }
-    pipWindow.document.getElementById("sticky-note-pip-close")?.addEventListener("click", closeStickyNotePictureInPicture);
-    pipWindow.addEventListener("pagehide", () => {
-      if (stickyNotePictureInPictureWindow !== pipWindow) return;
-      stickyNotePictureInPictureWindow = null;
-      stickyNotePictureInPictureNoteId = null;
-      if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
-      stickyNotePictureInPictureInterval = null;
-    }, { once: true });
-    if (stickyNotePictureInPictureInterval) clearInterval(stickyNotePictureInPictureInterval);
-    updateStickyNotePictureInPicture();
-    stickyNotePictureInPictureInterval = setInterval(updateStickyNotePictureInPicture, 500);
-  } catch (error) {
-    console.error("Could not open sticky note Picture-in-Picture:", error);
-    closeStickyNotePictureInPicture();
-    const button = document.querySelector(`[data-floating-note-pip="${noteId}"]`);
-    if (button) {
-      button.disabled = true;
-      button.title = "Floating mode could not open in this browser window.";
-    }
-    showToast("This browser couldn't open a floating note. It remains pinned in Questify.");
-  }
-}
-
 async function openLockInPictureInPicture() {
   const status = document.getElementById("lockin-picture-in-picture-status");
   try {
-    closeStickyNotePictureInPicture();
     const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 320, height: 190 });
     lockInPictureInPictureWindow = pipWindow;
     pipWindow.document.title = "Questify Lock In";
@@ -5051,7 +4958,7 @@ function renderStickyNotesPage() {
         <div>
           <p class="dashboard-section__eyebrow">YOUR THOUGHTS, IN ONE PLACE</p>
           <h1 id="sticky-notes-title">Sticky Notes</h1>
-          <p class="text-muted">Capture quick ideas, color-code them, and pin one above any Questify page. Supported desktop browsers can also float a pinned note above other apps.</p>
+          <p class="text-muted">Capture quick ideas, color-code them, open a note in its own window, or pin it over any Questify page.</p>
         </div>
         <button type="button" class="btn" id="create-sticky-note">＋ New note</button>
       </header>
@@ -5066,6 +4973,108 @@ function renderStickyNotesPage() {
       }
     </section>
   `;
+}
+
+function renderStickyNotePopup() {
+  const note = state.notes.find((item) => item.id === stickyNoteWindowId);
+  if (!note) {
+    return `
+      <section class="sticky-note-window__empty card">
+        <p class="dashboard-section__eyebrow">STICKY NOTES</p>
+        <h1>This note is no longer available</h1>
+        <p class="text-muted">It may have been deleted in another Questify window.</p>
+        <button type="button" class="btn-secondary" data-note-window-close>Close window</button>
+      </section>
+    `;
+  }
+  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  const isPinned = state.preferences.floatingNoteId === note.id;
+  return `
+    <section class="sticky-note-window" aria-label="Sticky note window">
+      <header class="sticky-note-window__brand">
+        <img src="logo.svg" alt="" width="28" height="28">
+        <div><p class="dashboard-section__eyebrow">QUESTIFY STICKY NOTE</p><h1>Quick thought space</h1></div>
+        <button type="button" class="btn-secondary btn-sm" data-note-window-close>Close</button>
+      </header>
+      <article class="sticky-note-card sticky-note-card--window ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+        <div class="sticky-note-card__header">
+          <span class="sticky-note-card__pin-indicator">${isPinned ? "Pinned on Questify" : "Sticky note"}</span>
+          <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
+        </div>
+        <label class="sr-only" for="note-window-title">Note title</label>
+        <input id="note-window-title" class="sticky-note-card__title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" data-note-title="${escapeAttribute(note.id)}" aria-label="Note title">
+        <label class="sr-only" for="note-window-content">Note content</label>
+        <textarea id="note-window-content" data-note-content="${escapeAttribute(note.id)}" maxlength="2000" rows="8" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-note-color-id="${escapeAttribute(note.id)}" data-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+          <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
+        </div>
+        <div class="sticky-note-card__actions">
+          <button type="button" class="btn-secondary btn-sm" data-note-pin="${escapeAttribute(note.id)}" aria-pressed="${isPinned}">${isPinned ? "Unpin from Questify" : "Pin on Questify"}</button>
+          <span class="sticky-note-window__sync" role="status">Edits save automatically and sync with Questify.</span>
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+function openStickyNoteWindow(noteId) {
+  const note = state.notes.find((item) => item.id === noteId);
+  if (!note) {
+    showToast("This sticky note could not be found.");
+    return;
+  }
+  const noteUrl = new URL(window.location.href);
+  noteUrl.searchParams.delete("focus");
+  noteUrl.searchParams.set("note", noteId);
+  noteUrl.hash = "";
+  const noteWindow = window.open(
+    noteUrl.toString(),
+    `questify-sticky-note-${noteId}`,
+    "popup=yes,width=400,height=520,resizable=yes,scrollbars=yes"
+  );
+  if (!noteWindow) {
+    showToast("Allow pop-ups to open this sticky note in its own window.");
+    return;
+  }
+  noteWindow.focus();
+}
+
+function toggleStickyNotePin(noteId) {
+  if (!state.notes.some((note) => note.id === noteId)) return;
+  state.preferences.floatingNoteId = state.preferences.floatingNoteId === noteId ? null : noteId;
+  state.preferences.floatingSessionNote = false;
+  saveState();
+  renderView();
+}
+
+function attachStickyNotePopupHandlers() {
+  attachStickyNoteEditorHandlers();
+  document.querySelectorAll("[data-note-color-id]").forEach((button) => {
+    button.addEventListener("click", () => updateStickyNoteColor(button.dataset.noteColorId, button.dataset.noteColor));
+  });
+  document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
+    input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
+  });
+  document.querySelectorAll("[data-note-pin]").forEach((button) => {
+    button.addEventListener("click", () => toggleStickyNotePin(button.dataset.notePin));
+  });
+  document.querySelectorAll("[data-note-window-close]").forEach((button) => {
+    button.addEventListener("click", closeStickyNoteWindow);
+  });
+}
+
+function closeStickyNoteWindow() {
+  if (window.opener && !window.opener.closed) {
+    window.close();
+    return;
+  }
+  const appUrl = new URL(window.location.href);
+  appUrl.searchParams.delete("note");
+  appUrl.hash = "";
+  window.location.replace(appUrl.toString());
 }
 
 function renderStickyNoteCard(note) {
@@ -5090,6 +5099,7 @@ function renderStickyNoteCard(note) {
       </div>
       <div class="sticky-note-card__actions">
         <button type="button" class="btn-secondary btn-sm" data-note-pin="${escapeAttribute(note.id)}">${isPinned ? "Unpin" : "Pin on screen"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-open-window="${escapeAttribute(note.id)}">Open in window ↗</button>
         ${confirmingDelete
           ? `<span class="sticky-note-card__confirm">Delete this note?</span>
              <button type="button" class="btn-delete btn-sm" data-note-delete-confirm="${escapeAttribute(note.id)}">Delete</button>
@@ -5121,20 +5131,7 @@ function attachStickyNotesHandlers() {
   document.getElementById("create-sticky-note")?.addEventListener("click", createNote);
   document.querySelector("[data-create-first-note]")?.addEventListener("click", createNote);
 
-  document.querySelectorAll("[data-note-title], [data-note-content]").forEach((input) => {
-    input.addEventListener("input", () => {
-      const note = state.notes.find((item) => item.id === input.dataset.noteTitle || item.id === input.dataset.noteContent);
-      if (!note) return;
-      if (input.hasAttribute("data-note-title")) note.title = input.value.slice(0, 80);
-      else note.content = input.value.slice(0, 2000);
-      note.updatedAt = new Date().toISOString();
-      const card = input.closest("[data-note-card]");
-      const updatedLabel = card?.querySelector(".sticky-note-card__updated");
-      if (updatedLabel) updatedLabel.textContent = "just now";
-      saveState();
-      updateFloatingSavedNote(note);
-    });
-  });
+  attachStickyNoteEditorHandlers();
 
   document.querySelectorAll("[data-note-color-id]").forEach((button) => {
     button.addEventListener("click", () => updateStickyNoteColor(button.dataset.noteColorId, button.dataset.noteColor));
@@ -5144,13 +5141,11 @@ function attachStickyNotesHandlers() {
   });
   document.querySelectorAll("[data-note-pin]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.preferences.floatingNoteId = state.preferences.floatingNoteId === button.dataset.notePin
-        ? null
-        : button.dataset.notePin;
-      state.preferences.floatingSessionNote = false;
-      saveState();
-      renderView();
+      toggleStickyNotePin(button.dataset.notePin);
     });
+  });
+  document.querySelectorAll("[data-note-open-window]").forEach((button) => {
+    button.addEventListener("click", () => openStickyNoteWindow(button.dataset.noteOpenWindow));
   });
   document.querySelectorAll("[data-note-delete]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5172,6 +5167,27 @@ function attachStickyNotesHandlers() {
     button.addEventListener("click", () => {
       confirmingNoteDeleteId = null;
       renderView();
+    });
+  });
+}
+
+function attachStickyNoteEditorHandlers() {
+  document.querySelectorAll("[data-note-title], [data-note-content]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const noteId = input.dataset.noteTitle || input.dataset.noteContent;
+      const note = state.notes.find((item) => item.id === noteId);
+      if (!note) return;
+      if (input.hasAttribute("data-note-title")) note.title = input.value.slice(0, 80);
+      else note.content = input.value.slice(0, 2000);
+      note.updatedAt = new Date().toISOString();
+      const card = input.closest("[data-note-card]");
+      const updatedLabel = card?.querySelector(".sticky-note-card__updated");
+      if (updatedLabel) updatedLabel.textContent = "just now";
+      if (isStickyNoteWindow && input.hasAttribute("data-note-title")) {
+        document.title = `${note.title || "Sticky Note"} — Questify`;
+      }
+      saveState();
+      updateFloatingSavedNote(note);
     });
   });
 }
@@ -5263,6 +5279,16 @@ const views = {
     </div>
   `,
   notes: () => renderStickyNotesPage(),
+  lockin: () => `
+    <section class="view-heading">
+      <div>
+        <p class="dashboard-section__eyebrow">FOCUS ON ONE THING</p>
+        <h2>Lock In</h2>
+        <p class="text-muted">Choose a focus block, quiet Questify notifications if you like, and keep your session in view.</p>
+      </div>
+    </section>
+    ${renderLockInPanel()}
+  `,
   dashboard: () => `
     <section class="dashboard-hero">
       <div class="dashboard-greeting">
@@ -5469,8 +5495,6 @@ const views = {
       </div>
     </section>
 
-    ${renderLockInPanel()}
-
     <form id="add-challenge-form" class="add-challenge-form" novalidate>
       <label for="add-challenge-input" class="sr-only">New challenge title</label>
       <input
@@ -5538,8 +5562,9 @@ const views = {
     <div id="challenge-list" class="challenge-list">
       ${(() => {
         const filtered = getFilteredChallenges();
+        const regularChallengeCount = state.challenges.filter((challenge) => !challenge.isLockIn).length;
 
-        if (state.challenges.length === 0) {
+        if (regularChallengeCount === 0) {
           return `<p class="empty-state text-muted">No challenges yet. Add your first one above.</p>`;
         }
 
@@ -6012,14 +6037,14 @@ function attachDashboardHandlers() {
   const resumeLockInBtn = document.getElementById("dashboard-resume-lockin-btn");
   if (resumeLockInBtn) {
     resumeLockInBtn.addEventListener("click", () => {
-      navigateTo("challenges");
+      navigateTo("lockin");
     });
   }
 
   const startLockInBtn = document.getElementById("dashboard-lockin-btn");
   if (startLockInBtn) {
     startLockInBtn.addEventListener("click", () => {
-      navigateTo("challenges");
+      navigateTo("lockin");
     });
   }
 }
@@ -6921,6 +6946,16 @@ function renderView() {
     currentView = "login";
   }
 
+  if (isStickyNoteWindow && !["consent", "login"].includes(currentView)) {
+    document.body.classList.add("is-sticky-note-window");
+    const note = state.notes.find((item) => item.id === stickyNoteWindowId);
+    document.title = `${note?.title || "Sticky Note"} — Questify`;
+    mainEl.innerHTML = renderStickyNotePopup();
+    attachStickyNotePopupHandlers();
+    return;
+  }
+  document.body.classList.remove("is-sticky-note-window");
+
   if (isLockInFocusWindow && !["consent", "login"].includes(currentView)) {
     document.body.classList.add("is-lockin-focus-window");
     mainEl.innerHTML = `${renderLockInFocusWindow()}${renderLockInExitDialog()}`;
@@ -6957,6 +6992,10 @@ function renderView() {
   }
 
   if (currentView === "challenges") {
+    attachChallengesHandlers();
+  }
+
+  if (currentView === "lockin") {
     attachChallengesHandlers();
   }
 
@@ -7007,7 +7046,7 @@ function updateActiveNavButton() {
       btn.removeAttribute("aria-current");
     }
   });
-  const activeMoreView = ["badges", "notes", "profile", "settings"].includes(currentView);
+  const activeMoreView = ["challenges", "badges", "notes", "profile", "settings"].includes(currentView);
   const moreToggle = document.getElementById("nav-more-toggle");
   const nav = moreToggle?.closest(".app-nav");
   const secondaryNav = nav?.querySelector(".app-nav-secondary");
@@ -7195,7 +7234,9 @@ function init() {
 
   const hashView = window.location.hash.replace("#", "");
   const startingView = getActiveLockIn()?.wasInterrupted
-    ? "challenges"
+    ? "lockin"
+    : isStickyNoteWindow
+    ? "notes"
     : (hashView === "stats" ? "profile" : views[hashView] && hashView !== "tour" ? hashView : "dashboard");
   if (hashView) {
     history.replaceState({ view: startingView }, "", `${window.location.pathname}${window.location.search}`);

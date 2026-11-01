@@ -2,7 +2,7 @@
 // the old cache instead of serving stale assets. This must change on every
 // deploy - a byte-identical service-worker.js never triggers a browser
 // update check, so the old cache (and old app code) would be served forever.
-const CACHE_NAME = "questify-cache-v44";
+const CACHE_NAME = "questify-cache-v45";
 
 const APP_SHELL = [
   "./",
