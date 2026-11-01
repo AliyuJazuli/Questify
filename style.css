@@ -7132,6 +7132,20 @@ body.is-sticky-note-window .app-main {
     display: contents;
   }
 }
+@media (min-width: 768px) {
+  body.nav-layout-sidebar .notif-panel {
+    position: fixed;
+    inset: auto auto 1rem calc(256px + 12px);
+    width: min(340px, calc(100vw - 280px));
+    max-height: calc(100dvh - 2rem);
+    z-index: 1200;
+  }
+
+  body.nav-layout-sidebar.is-nav-collapsed .notif-panel {
+    left: 96px;
+    width: min(340px, calc(100vw - 120px));
+  }
+}
 
 @media (min-width: 768px) and (max-width: 1023px) {
   body.nav-layout-sidebar.is-nav-collapsed .app-nav-primary,
