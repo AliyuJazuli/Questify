@@ -1430,6 +1430,209 @@ body.is-lockin-focus-window .lockin-panel__actions button {
   text-align: center;
 }
 
+.consent-card {
+  gap: clamp(0.75rem, 2.2vw, 1rem);
+}
+
+.consent-card > .consent-intro {
+  max-width: 58ch;
+  color: color-mix(in srgb, var(--color-text-muted) 80%, var(--color-text));
+  line-height: 1.6;
+}
+
+.consent-document-link {
+  min-height: 68px;
+  padding: 0.8rem 1rem;
+}
+
+.consent-document-link strong {
+  color: var(--color-text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 0.16em;
+}
+
+.consent-document-link small {
+  color: color-mix(in srgb, var(--color-text-muted) 80%, var(--color-text));
+  line-height: 1.45;
+}
+
+#consent-form {
+  gap: 0.7rem;
+}
+
+.consent-agreements {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  gap: 0.55rem;
+}
+
+.consent-agreements legend {
+  padding: 0;
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.consent-instructions {
+  margin: -0.2rem 0 0.1rem;
+  color: color-mix(in srgb, var(--color-text-muted) 80%, var(--color-text));
+  line-height: 1.5;
+}
+
+.consent-version {
+  color: color-mix(in srgb, var(--color-text-muted) 80%, var(--color-text));
+}
+
+.consent-check {
+  position: relative;
+  box-sizing: border-box;
+  min-height: 56px;
+  align-items: center;
+  gap: 0;
+  padding: 0.55rem 0.7rem 0.55rem 3.1rem;
+  border: 1px solid var(--color-border-glass);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-alt);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.consent-check:hover,
+.consent-check:focus-within {
+  border-color: var(--color-primary-light);
+}
+
+.consent-check input {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 0;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  margin: 0;
+  opacity: 0;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.consent-check > span {
+  position: relative;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.consent-check > span::before {
+  position: absolute;
+  top: 50%;
+  left: -2.35rem;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 4px;
+  background: var(--color-surface);
+  content: "";
+  transform: translateY(-50%);
+}
+
+.consent-check input:checked + span::before {
+  border-color: var(--color-primary-dark);
+  background: var(--color-primary-dark);
+}
+
+.consent-check input:checked + span::after {
+  position: absolute;
+  top: 50%;
+  left: calc(-2.35rem + 6px);
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  content: "";
+  transform: translateY(-65%) rotate(45deg);
+}
+
+.consent-check input:focus-visible + span::before {
+  outline: 3px solid var(--color-text);
+  outline-offset: 3px;
+}
+
+.consent-check.is-invalid {
+  border-color: var(--color-danger);
+}
+
+.consent-check a {
+  position: relative;
+  z-index: 2;
+  color: var(--color-primary-dark);
+  font-weight: 700;
+  text-decoration-thickness: 1.5px;
+}
+
+:is([data-theme="ocean"], [data-theme="lavender"], [data-theme="midnight"]) .consent-check a {
+  color: var(--color-primary-light);
+}
+
+.consent-error {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  color: var(--color-text);
+  border-left: 3px solid var(--color-danger);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: color-mix(in srgb, var(--color-danger) 12%, var(--color-surface));
+  line-height: 1.5;
+}
+
+.consent-error:empty {
+  display: none;
+}
+
+#consent-form > button[type="submit"] {
+  min-height: 48px;
+  justify-self: start;
+}
+
+@media (max-width: 520px) {
+  .consent-screen {
+    min-height: auto;
+    padding: 0.75rem;
+  }
+
+  .consent-card {
+    gap: 0.75rem;
+    padding: 1rem;
+  }
+
+  .consent-logo {
+    width: 48px;
+    height: 48px;
+  }
+
+  .consent-card h1 {
+    font-size: clamp(1.55rem, 7vw, 1.9rem);
+  }
+
+  .consent-document-link {
+    min-height: 64px;
+    padding: 0.7rem 0.75rem;
+  }
+
+  #consent-form > button[type="submit"] {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .consent-document-link,
+  .consent-check {
+    transition: none;
+  }
+}
+
 .navigation-choice-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
