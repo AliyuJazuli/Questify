@@ -58,14 +58,21 @@ const isLockInTimerWindow = initialUrlParams.get("timer") === "lockin";
 const sessionNoteWindowId = initialUrlParams.get("session-note");
 const isSessionNoteWindow = Boolean(sessionNoteWindowId);
 const FLOATING_WIDGETS_STORAGE_KEY = "questify_floating_widgets";
+const UPDATE_REMINDER_STORAGE_KEY = "questify_update_prompt_dismissed_at";
+const UPDATE_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const appWindowId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const lockInStateChannel = "BroadcastChannel" in window
   ? new BroadcastChannel("questify-lockin-state")
   : null;
 let floatingWidgetHeartbeatId = null;
 let appUpdatePrompt = null;
+let appUpdateRegistration = null;
 let shouldReloadForAppUpdate = false;
 let appUpdateActivationTimeoutId = null;
+let appUpdateCheckIntervalId = null;
+let appUpdateReminderIntervalId = null;
+let lastBackgroundUpdateCheckAt = 0;
 
 // -------------------------------------
 // App-wide configuration constants
@@ -100,6 +107,7 @@ function getDefaultState() {
       isOnboarded: false,
       hasSeenTour: false,
       hasCompletedTour: false,
+      hasSeenFirstStepWelcome: false,
       dailyGoal: CONFIG.DEFAULT_DAILY_GOAL,
     },
     challenges: [],
@@ -116,6 +124,7 @@ function getDefaultState() {
       remindersEnabled: false,
       lastReminderDate: null,
       blockNotificationsDuringLockIn: false,
+      floatingWindowsTransparent: false,
       lastLockInDuration: 60,
       lockInNote: "",
       lockInNoteColor: "#fff1a8",
@@ -309,10 +318,14 @@ function loadState() {
           ...defaultState.user,
           ...savedState.user,
           hasCompletedTour: Boolean(savedState.user?.hasCompletedTour ?? savedState.user?.hasSeenTour),
+          hasSeenFirstStepWelcome: Boolean(
+            savedState.user?.hasSeenFirstStepWelcome || savedState.challenges?.length > 0
+          ),
         },
         preferences: {
           ...defaultState.preferences,
           ...savedState.preferences,
+          floatingWindowsTransparent: Boolean(savedState.preferences?.floatingWindowsTransparent),
           navigationMode: ["auto", "sidebar", "bottom"].includes(savedState.preferences?.navigationMode)
             ? savedState.preferences.navigationMode
             : "auto",
@@ -363,7 +376,7 @@ let searchQuery = "";
 let statusFilter = "all"; // "all" | "active" | "completed" | "archived"
 let dueFilter = "all"; // "all" | "today" | "week" - which challenges show by scheduled date
 let isConfirmingReset = false;
-let tourStep = 0; // which onboarding tour slide is showing (0-2)
+let tourStep = 0; // current onboarding tour step
 let tourTargetView = "dashboard";
 let isTourActive = false;
 let previouslyOnboarded = false;
@@ -378,9 +391,10 @@ let isSidebarCollapsed = false;
 let isMobileNavigationOpen = false;
 let lockInPictureInPictureWindow = null;
 let lockInPictureInPictureInterval = null;
+let lockInTimerPopupWindow = null;
 let sessionNotePictureInPictureWindow = null;
 let savedNotePictureInPictureWindow = null;
-let lockInTimerPopupWindow = null;
+let savedNotePictureInPictureNoteId = null;
 let sessionNotePopupWindow = null;
 
 function getLockInSyncSignature() {
@@ -404,19 +418,38 @@ function getNotesSyncSignature() {
   ]);
 }
 
+function getHabitSyncSignature() {
+  return JSON.stringify([
+    state.habits,
+    state.habitXpLedger,
+    state.user.xp,
+    state.user.level,
+    state.user.streak,
+  ]);
+}
+
 function handleLockInStateSync() {
   const previousSignature = getLockInSyncSignature();
   const previousNotesSignature = getNotesSyncSignature();
+  const previousHabitSignature = getHabitSyncSignature();
   const noteIsFocused = document.activeElement?.matches(
     "#lockin-note-input, [data-floating-note-content], [data-note-content], [data-note-title]"
+  );
+  const editorIsFocused = document.activeElement?.matches(
+    "input:not([type='button']):not([type='submit']), textarea, select, [contenteditable='true']"
   );
   loadState();
   window.__questifyState = state;
   applyTheme();
   const sessionChanged = previousSignature !== getLockInSyncSignature();
   const notesChanged = previousNotesSignature !== getNotesSyncSignature();
+  const habitsChanged = previousHabitSignature !== getHabitSyncSignature();
   syncSessionNotePictureInPicture();
   syncSavedNotePictureInPicture();
+  if (habitsChanged && !editorIsFocused && ["dashboard", "calendar", "habits"].includes(currentView)) {
+    renderView();
+    return;
+  }
   if (!noteIsFocused && (
     isLockInFocusWindow ||
     isStickyNoteWindow ||
@@ -920,6 +953,7 @@ function addChallenge(title, difficulty = "easy", scheduledDate = "", category =
     dateCreated: new Date().toISOString(),
   };
   state.challenges.push(newChallenge);
+  state.user.hasSeenFirstStepWelcome = true;
   saveState();
   return true;
 }
@@ -1008,6 +1042,10 @@ function deleteHabit(id) {
   state.habits.splice(index, 1);
   saveState();
   return true;
+}
+
+function getHabitCheckInCount(habit) {
+  return Array.isArray(habit?.completedDates) ? habit.completedDates.length : 0;
 }
 
 function getHabitXpForDate(dateStr, s = state) {
@@ -1582,6 +1620,7 @@ function updateLockInTimerDisplay() {
   const xpEl = document.getElementById("lockin-xp-preview");
   if (xpEl) xpEl.textContent = `~${projectedXp} XP so far`;
   updateLockInPictureInPicture(active, elapsedSec);
+  updateLockInPictureInPictureButton();
   const floatingTimer = document.getElementById("floating-lockin-timer-value");
   if (floatingTimer) {
     floatingTimer.textContent = active.isPaused
@@ -1635,6 +1674,7 @@ function renderLockInExitDialog() {
           <button type="button" class="btn-secondary" data-lockin-exit-action="cancel">Cancel timer &amp; exit</button>
           <button type="button" class="btn" data-lockin-exit-action="finish">Finish session</button>
           <button type="button" class="btn-secondary" data-lockin-exit-action="quit">Leave with timer paused</button>
+          <button type="button" class="btn-secondary" data-lockin-exit-action="resume">Return and continue Lock In</button>
         </div>
       </section>
     </div>
@@ -1663,6 +1703,10 @@ function attachLockInExitDialogHandlers() {
           active.wasInterrupted = false;
           saveState();
           navigateTo("dashboard");
+          break;
+        case "resume":
+          resumeLockIn(active.id);
+          navigateTo("lockin");
           break;
         default:
           console.error(`Unknown Lock In exit action: "${button.dataset.lockinExitAction}"`);
@@ -2837,6 +2881,7 @@ function getCalendarGridData(year, month) {
       challengeCount: activity.challengeCount,
       xp: activity.xp,
       isToday: dateStr === todayStr,
+      isFuture: dateStr > todayStr,
       habitStatus,
     });
   }
@@ -3269,9 +3314,14 @@ function renderTodaySummaryCard() {
 // -------------------------------------
 // Dashboard: Welcome card for first-time users
 // -------------------------------------
+function dismissFirstStepWelcome() {
+  if (state.user.hasSeenFirstStepWelcome) return;
+  state.user.hasSeenFirstStepWelcome = true;
+  saveState();
+}
+
 function renderFirstTimeWelcomeCard() {
-  const hasChallenges = state.challenges.length > 0;
-  if (hasChallenges) return "";
+  if (state.user.hasSeenFirstStepWelcome || state.challenges.length > 0) return "";
 
   return `
     <section class="card welcome-card first-time-welcome" aria-labelledby="first-step-title">
@@ -3329,51 +3379,6 @@ function renderDashboardLockInCta() {
       <button type="button" class="btn dashboard-lockin-cta__button" id="dashboard-lockin-btn">
         <span>Start Lock In</span><span aria-hidden="true">↗</span>
       </button>
-    </section>
-  `;
-}
-
-function renderDashboardHabitSummary() {
-  const habits = getActiveHabits();
-  const today = getTodayDateString();
-  const completed = getHabitCompletionsForDate(today).length;
-  const percent = habits.length ? Math.round((completed / habits.length) * 100) : 0;
-
-  if (!habits.length) {
-    return `
-      <section class="card dashboard-habit-summary dashboard-habit-summary--empty">
-        <div>
-          <p class="dashboard-section__eyebrow">BUILD YOUR ROUTINE</p>
-          <h3>Make space for your daily habits</h3>
-          <p class="text-muted">Track the small rituals that help you feel your best, one day at a time.</p>
-        </div>
-        <button class="btn" type="button" data-navigate="habits">Set up habits</button>
-      </section>
-    `;
-  }
-
-  return `
-    <section class="card dashboard-habit-summary" aria-labelledby="dashboard-habits-title">
-      <div class="dashboard-habit-summary__heading">
-        <div>
-          <p class="dashboard-section__eyebrow">SHOW UP FOR YOURSELF</p>
-          <h3 id="dashboard-habits-title">Your habits today</h3>
-        </div>
-        <div class="dashboard-habit-summary__progress">
-          <strong>${completed}<span>/${habits.length}</span></strong>
-          <span class="text-muted">complete</span>
-        </div>
-      </div>
-      <div class="habit-week-progress__track" aria-label="${percent}% of today's habits complete">
-        <span style="width:${percent}%"></span>
-      </div>
-      <div class="habit-daily-list dashboard-habit-summary__list">
-        ${habits.slice(0, 4).map((habit) => renderHabitDailyRow(habit, today)).join("")}
-      </div>
-      <div class="dashboard-habit-summary__footer">
-        ${habits.length > 4 ? `<span class="text-muted">and ${habits.length - 4} more</span>` : ""}
-        <button class="btn-secondary btn-sm" type="button" data-navigate="habits">View all habits</button>
-      </div>
     </section>
   `;
 }
@@ -3514,6 +3519,7 @@ function getWeekGridData(refDate) {
       dayNumber: d.getDate(),
       monthLabel: CALENDAR_MONTH_NAMES[d.getMonth()].slice(0, 3),
       isToday,
+      isFuture: dateStr > todayStr,
       completed: completedThatDay,
       active: activeThatDay,
       habits: completedHabitsThatDay,
@@ -3534,7 +3540,8 @@ const CALENDAR_MONTH_NAMES = [
 ];
 const CALENDAR_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function renderCalendarDayDetails(dateStr) {
+function renderCalendarDayDetails(dateStr, variant = "calendar") {
+  const isDashboardReview = variant === "dashboard";
   const date = new Date(`${dateStr}T00:00:00`);
   const label = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(date);
   const eligibleHabits = (state.habits || []).filter((habit) =>
@@ -3563,14 +3570,16 @@ function renderCalendarDayDetails(dateStr) {
     : "Habits still open";
 
   return `
-    <section class="card calendar-day-details" aria-labelledby="calendar-day-title">
+    <section class="card calendar-day-details ${isDashboardReview ? "dashboard-daily-review" : ""}" aria-labelledby="calendar-day-title">
       <div class="calendar-day-details__header">
         <div>
-          <p class="dashboard-section__eyebrow">DAILY REVIEW</p>
+          <p class="dashboard-section__eyebrow">${isDashboardReview ? "YOUR DAILY REVIEW" : "DAILY REVIEW"}</p>
           <h3 id="calendar-day-title">${escapeHTML(label)}</h3>
           <p class="text-muted">${escapeHTML(status)}</p>
         </div>
-        ${calendarViewMode === "day" ? `
+        ${isDashboardReview
+          ? `<button type="button" class="btn-secondary btn-sm" data-navigate="habits">Manage habits</button>`
+          : calendarViewMode === "day" ? `
           <div class="calendar-day-details__controls">
             <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
             <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
@@ -3641,6 +3650,7 @@ function renderCalendarGrid() {
         "calendar-day",
         !cell.inMonth ? "is-outside-month" : "",
         cell.isToday ? "is-today" : "",
+        cell.isFuture ? "is-future" : "",
         cell.dateStr === calendarSelectedDate ? "is-selected" : "",
         cell.habitStatus ? `habit-status-${cell.habitStatus}` : "",
         intensity > 0 ? `intensity-${intensity}` : "",
@@ -3745,7 +3755,7 @@ function renderWeekDayCard(day) {
   const isEmpty = day.active.length === 0 && day.completed.length === 0;
 
   return `
-    <div class="week-day-card ${day.isToday ? "is-today" : ""} ${day.dateStr === calendarSelectedDate ? "is-selected" : ""}" data-date="${day.dateStr}" role="button" tabindex="0" aria-pressed="${day.dateStr === calendarSelectedDate}" aria-label="${day.dayLabel}, ${day.monthLabel} ${day.dayNumber}: ${day.habits.length} of ${day.habitTotal} habits, ${day.completed.length} challenges, ${day.xp} XP">
+    <div class="week-day-card ${day.isToday ? "is-today" : ""} ${day.isFuture ? "is-future" : ""} ${day.dateStr === calendarSelectedDate ? "is-selected" : ""}" data-date="${day.dateStr}" role="button" tabindex="0" aria-pressed="${day.dateStr === calendarSelectedDate}" aria-label="${day.dayLabel}, ${day.monthLabel} ${day.dayNumber}: ${day.habits.length} of ${day.habitTotal} habits, ${day.completed.length} challenges, ${day.xp} XP">
       <div class="week-day-header">
         <span class="week-day-label">${day.dayLabel}</span>
         <span class="week-day-number">${day.dayNumber}</span>
@@ -4004,6 +4014,8 @@ function renderDayDetailModal() {
 function renderHabitTracker() {
   const habits = getActiveHabits();
   const archivedHabits = (state.habits || []).filter((habit) => habit.archived);
+  const habitPendingDeletion = state.habits.find((habit) => habit.id === confirmingHabitDeleteId);
+  const pendingCheckInCount = getHabitCheckInCount(habitPendingDeletion);
   const days = getWeekGridData(weekViewDate);
   const daysToDate = days.filter((day) => day.dateStr <= getTodayDateString()).length;
   const checkedThisWeek = habits.reduce(
@@ -4221,8 +4233,10 @@ function renderHabitTracker() {
     ${confirmingHabitDeleteId ? `
       <div class="modal-overlay habit-delete-overlay">
         <section class="modal-card card" role="alertdialog" aria-modal="true" aria-labelledby="habit-delete-title">
-          <h3 id="habit-delete-title">Delete this habit?</h3>
-          <p class="text-muted">This permanently removes the habit and its check-in history. Previously earned XP and levels will not be taken away.</p>
+          <h3 id="habit-delete-title">${pendingCheckInCount ? "Delete this checked habit?" : "Delete this habit?"}</h3>
+          <p class="text-muted">${pendingCheckInCount
+            ? `This habit has ${pendingCheckInCount} check-in${pendingCheckInCount === 1 ? "" : "s"}. Deleting it permanently removes its check-in history, but previously earned XP and levels will not be taken away.`
+            : "This permanently removes the habit and its check-in history. Previously earned XP and levels will not be taken away."}</p>
           <div class="habit-delete-actions">
             <button type="button" class="btn-secondary" data-habit-delete-cancel>Keep habit</button>
             <button type="button" class="btn-danger" data-habit-delete-confirm>Delete habit</button>
@@ -4298,6 +4312,10 @@ function renderLockInStickyNote() {
       <div class="lockin-sticky-note__top">
         <label id="lockin-note-title" for="lockin-note-input">Sticky note</label>
         <span id="lockin-note-saved" role="status">${savedNote ? "Saved to Sticky Notes" : "Session only"}</span>
+        ${isSessionNoteWindow ? `
+          <button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Unpin" : "Pin"}</button>
+          <button type="button" class="btn-secondary btn-sm" data-session-note-window-close aria-label="Close sticky note">×</button>
+        ` : ""}
       </div>
       <textarea id="lockin-note-input" maxlength="500" rows="3" placeholder="Keep your next thought here…">${escapeHTML(active.sessionNote || "")}</textarea>
       <div class="lockin-sticky-note__tools">
@@ -4310,13 +4328,13 @@ function renderLockInStickyNote() {
       </div>
       <div class="lockin-note-actions">
         ${!isSessionNoteWindow
-          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">Open note pop-out ↗</button>`
+          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">Open note window ↗</button>`
           : ""}
         <button type="button" class="btn-secondary btn-sm" id="lockin-save-note-btn">${savedNote ? "Update Sticky Notes" : "Save to Sticky Notes"}</button>
       </div>
       ${!isSessionNoteWindow
-        ? `<p class="lockin-note-hint text-muted">Open a separate note window to keep this note independent of the focus timer. Unsaved notes disappear when this session ends.</p>`
-        : `<p class="lockin-note-hint text-muted">Session-only note · saved automatically while this Lock In session is active.</p>`}
+        ? `<p class="lockin-note-hint text-muted">Open the note in its own window to pin it independently of the timer.</p>`
+        : ""}
     </section>
   `;
 }
@@ -4393,27 +4411,22 @@ function isSessionNotePictureInPictureOpen() {
 
 function updateSessionNotePictureInPictureButton() {
   const button = document.getElementById("lockin-session-note-pip-btn");
-  const status = document.getElementById("lockin-session-note-pip-status");
   if (button) {
-    button.textContent = isSessionNotePictureInPictureOpen()
-      ? "Close pop-out"
-      : "Open pop-out";
-  }
-  if (status) {
-    status.textContent = isSessionNotePictureInPictureOpen()
-      ? "Sticky note is open in its own browser window."
-      : "Open the note in its own browser window; always-on-top behavior depends on your browser and operating system.";
+    button.textContent = isSessionNoteWindow
+      ? isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note"
+      : "Open note window ↗";
   }
 }
 
 function preparePictureInPictureWindow(pipWindow, bodyClass, content) {
-  pipWindow.document.title = "Questify";
+  pipWindow.document.title = bodyClass === "lockin-pip-host" ? "Timer" : "Note";
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
   const stylesheet = pipWindow.document.createElement("link");
   stylesheet.rel = "stylesheet";
   stylesheet.href = new URL("style.css", window.location.href).href;
   pipWindow.document.head.append(stylesheet);
   pipWindow.document.body.classList.add(bodyClass);
+  pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   pipWindow.document.body.innerHTML = content;
 }
 
@@ -4421,9 +4434,6 @@ function closeSessionNotePictureInPicture() {
   const pipWindow = sessionNotePictureInPictureWindow;
   sessionNotePictureInPictureWindow = null;
   if (pipWindow && !pipWindow.closed) pipWindow.close();
-  const popupWindow = sessionNotePopupWindow;
-  sessionNotePopupWindow = null;
-  if (popupWindow && !popupWindow.closed) popupWindow.close();
   const noteWidget = getFloatingWidget("note");
   if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
     setFloatingWidget("note", null);
@@ -4439,42 +4449,104 @@ function syncSessionNotePictureInPicture() {
     closeSessionNotePictureInPicture();
     return;
   }
-  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "")
-    ? active.sessionNoteColor
-    : "#fff1a8";
   const note = pipWindow.document.querySelector(".session-note-pip");
-  if (note) {
-    note.style.setProperty("--lockin-note-color", color);
-    note.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
-  }
-  pipWindow.document.body.style.setProperty("--lockin-note-color", color);
-  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
-  pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
-  const title = pipWindow.document.getElementById("session-note-pip-title");
-  if (title) title.textContent = active.title;
+  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
+  pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
+  note?.style.setProperty("--lockin-note-color", color);
+  note?.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
   const input = pipWindow.document.getElementById("session-note-pip-content");
   if (input && pipWindow.document.activeElement !== input) {
     input.value = active.sessionNote || "";
   }
+  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+    const selected = button.dataset.pipNoteColor === color;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
 }
 
-function toggleSessionNotePictureInPicture() {
+async function toggleSessionNotePictureInPicture() {
   const active = getActiveLockIn();
   if (!active) return;
-  const noteUrl = new URL(window.location.href);
-  ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
-  noteUrl.searchParams.set("session-note", active.id);
-  noteUrl.hash = "";
-  sessionNotePopupWindow = window.open(
-    noteUrl.toString(),
-    `questify-lockin-note-${active.id}`,
-    "popup=yes,width=380,height=480,resizable=yes,scrollbars=yes"
-  );
-  if (!sessionNotePopupWindow) {
-    showToast("Allow pop-ups to open the Lock In note in its own window.");
+  if (!isSessionNoteWindow) {
+    if (sessionNotePopupWindow && !sessionNotePopupWindow.closed) {
+      sessionNotePopupWindow.focus();
+      return;
+    }
+    const noteUrl = new URL(window.location.href);
+    ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
+    noteUrl.searchParams.set("session-note", active.id);
+    noteUrl.hash = "";
+    sessionNotePopupWindow = window.open(
+      noteUrl.toString(),
+      `questify-lockin-note-${active.id}`,
+      "popup=yes,width=420,height=520,resizable=yes,scrollbars=no"
+    );
+    if (!sessionNotePopupWindow) {
+      showToast("The Lock In note stayed on this page because the browser blocked its separate window. Allow pop-ups to open it.");
+      return;
+    }
+    sessionNotePopupWindow.focus();
     return;
   }
-  sessionNotePopupWindow.focus();
+  if (isSessionNotePictureInPictureOpen()) {
+    closeSessionNotePictureInPicture();
+    return;
+  }
+  if (!supportsDocumentPictureInPicture()) {
+    showToast("This browser can't pin notes above other windows. The note remains editable in its separate window.");
+    return;
+  }
+  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
+  try {
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 300, height: 190 });
+    sessionNotePictureInPictureWindow = pipWindow;
+    preparePictureInPictureWindow(
+      pipWindow,
+      "note-pip-host",
+      `<main class="note-pip session-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+        <header><span>Note</span><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
+        <label class="sr-only" for="session-note-pip-content">Focus note</label>
+        <textarea id="session-note-pip-content" maxlength="500" placeholder="Add a thought…">${escapeHTML(active.sessionNote || "")}</textarea>
+        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+        </div>
+      </main>`
+    );
+    const input = pipWindow.document.getElementById("session-note-pip-content");
+    input?.addEventListener("input", () => {
+      const current = getActiveLockIn();
+      if (!current) return;
+      current.sessionNote = input.value.slice(0, 500);
+      saveState();
+      syncSessionNoteInput();
+    });
+    pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+      button.addEventListener("click", () => updateLockInNoteColor(button.dataset.pipNoteColor));
+    });
+    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
+      closeSessionNotePictureInPicture();
+      returnToQuestifyFromPopup();
+    });
+    pipWindow.addEventListener("pagehide", () => {
+      if (sessionNotePictureInPictureWindow === pipWindow) {
+        sessionNotePictureInPictureWindow = null;
+        const noteWidget = getFloatingWidget("note");
+        if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
+          setFloatingWidget("note", null);
+        }
+        updateSessionNotePictureInPictureButton();
+      }
+    }, { once: true });
+    setFloatingWidget("note", { mode: "pip", kind: "session", id: active.id });
+    syncSessionNotePictureInPicture();
+    updateSessionNotePictureInPictureButton();
+  } catch (error) {
+    console.error("Could not pin the Lock In note:", error);
+    showToast("The browser couldn't pin this note. It remains saved in its separate editor window.");
+  }
 }
 
 function syncSessionNoteInput() {
@@ -4487,33 +4559,51 @@ function openLockInFocusWindow() {
   const focusUrl = new URL(window.location.href);
   focusUrl.searchParams.set("focus", "lockin");
   focusUrl.hash = "";
+  const popupHeight = getActiveLockIn() ? 760 : 560;
   const focusWindow = window.open(
     focusUrl.toString(),
     "questify-lockin-focus",
-    "popup=yes,width=420,height=780,resizable=yes,scrollbars=yes"
+    `popup=yes,width=440,height=${popupHeight},resizable=yes,scrollbars=no`
   );
   if (!focusWindow) {
-    showToast("Allow pop-ups to open the Lock In focus window.");
+    showToast("The focus window was blocked. Allow pop-ups, or keep using the Lock In page here.");
     return;
   }
   focusWindow.focus();
 }
 
+function openLockInTimerPopupFallback() {
+  if (lockInTimerPopupWindow && !lockInTimerPopupWindow.closed) {
+    lockInTimerPopupWindow.focus();
+    return true;
+  }
+  const timerUrl = new URL(window.location.href);
+  ["focus", "note", "timer", "session-note"].forEach((key) => timerUrl.searchParams.delete(key));
+  timerUrl.searchParams.set("timer", "lockin");
+  timerUrl.hash = "";
+  lockInTimerPopupWindow = window.open(
+    timerUrl.toString(),
+    "questify-lockin-timer",
+    "popup=yes,width=340,height=300,resizable=yes,scrollbars=no"
+  );
+  if (!lockInTimerPopupWindow) return false;
+  lockInTimerPopupWindow.focus();
+  updateLockInPictureInPictureButton();
+  return true;
+}
+
 function renderLockInFocusWindow() {
   const active = getActiveLockIn();
   return `
-    <section class="lockin-focus-window" aria-labelledby="lockin-focus-window-title">
+    <section class="lockin-focus-window ${active ? "is-active" : "is-setup"}" aria-labelledby="lockin-focus-window-title">
       <header class="lockin-focus-window__header">
         <div class="lockin-focus-window__brand">
-          <img src="logo.svg" alt="" width="30" height="30">
-          <div><p class="dashboard-section__eyebrow">FOCUS SPACE</p><h1 id="lockin-focus-window-title">Questify Lock In</h1></div>
+          <div><p class="dashboard-section__eyebrow">FOCUS SPACE</p><h1 id="lockin-focus-window-title">${escapeHTML(active?.title || "Questify Lock In")}</h1></div>
         </div>
+        ${active ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary btn-sm" aria-label="Pin timer above other windows">${lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed ? "Unpin timer" : "Pin timer"}</button>` : ""}
         <button type="button" id="lockin-focus-window-close" class="btn-secondary btn-sm">Close</button>
       </header>
       ${renderLockInPanel()}
-      <div class="lockin-focus-window__pip">
-        <p class="text-muted">The timer stays here when you open its separate pop-out window.</p>
-      </div>
     </section>
   `;
 }
@@ -4521,14 +4611,20 @@ function renderLockInFocusWindow() {
 function updateLockInPictureInPictureButton() {
   const button = document.getElementById("lockin-picture-in-picture-btn");
   if (button) {
-    button.textContent = lockInTimerPopupWindow && !lockInTimerPopupWindow.closed
-      ? "Show timer pop-out ↗"
-      : "Pin timer pop-out ↗";
+    button.textContent = lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed
+      ? "Unpin timer"
+      : lockInTimerPopupWindow && !lockInTimerPopupWindow.closed
+      ? "Close timer window"
+      : "Pin timer";
   }
 }
 
 function updateLockInPictureInPicture(active, elapsedSec) {
   if (!lockInPictureInPictureWindow || lockInPictureInPictureWindow.closed) return;
+  lockInPictureInPictureWindow.document.body.classList.toggle(
+    "is-floating-transparent",
+    state.preferences.floatingWindowsTransparent
+  );
   const title = lockInPictureInPictureWindow.document.getElementById("lockin-pip-title");
   const timer = lockInPictureInPictureWindow.document.getElementById("lockin-pip-timer");
   const progress = lockInPictureInPictureWindow.document.getElementById("lockin-pip-progress");
@@ -4538,8 +4634,8 @@ function updateLockInPictureInPicture(active, elapsedSec) {
     timer.textContent = active.isPaused
       ? `Paused · ${formatLockInClock(remaining)}`
       : remaining > 0
-      ? `${formatLockInClock(remaining)} remaining`
-      : `${formatLockInClock(elapsedSec - active.targetMinutes * 60)} overtime`;
+      ? formatLockInClock(remaining)
+      : `+${formatLockInClock(elapsedSec - active.targetMinutes * 60)}`;
   }
   if (progress) progress.style.width = `${Math.min(100, (elapsedSec / (active.targetMinutes * 60)) * 100)}%`;
   const pauseButton = lockInPictureInPictureWindow.document.querySelector("[data-pip-pause]");
@@ -4552,42 +4648,100 @@ function closeLockInPictureInPicture() {
   const pipWindow = lockInPictureInPictureWindow;
   lockInPictureInPictureWindow = null;
   if (pipWindow && !pipWindow.closed) pipWindow.close();
-  const popupWindow = lockInTimerPopupWindow;
-  lockInTimerPopupWindow = null;
-  if (popupWindow && !popupWindow.closed) popupWindow.close();
   if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
   updateLockInPictureInPictureButton();
 }
 
-function openLockInPictureInPicture() {
-  const timerUrl = new URL(window.location.href);
-  ["focus", "note", "session-note"].forEach((key) => timerUrl.searchParams.delete(key));
-  timerUrl.searchParams.set("timer", "lockin");
-  timerUrl.hash = "";
-  lockInTimerPopupWindow = window.open(
-    timerUrl.toString(),
-    "questify-lockin-timer",
-    "popup=yes,width=360,height=440,resizable=yes,scrollbars=no"
-  );
-  if (!lockInTimerPopupWindow) {
-    showToast("Allow pop-ups to pin the Lock In timer in its own window.");
+async function openLockInPictureInPicture() {
+  if (lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed) {
+    closeLockInPictureInPicture();
     return;
   }
-  lockInTimerPopupWindow.focus();
-  updateLockInPictureInPictureButton();
+  if (lockInTimerPopupWindow && !lockInTimerPopupWindow.closed) {
+    lockInTimerPopupWindow.close();
+    lockInTimerPopupWindow = null;
+    updateLockInPictureInPictureButton();
+    return;
+  }
+  const active = getActiveLockIn();
+  if (!active) {
+    showToast("Start a Lock In session before pinning its timer.");
+    return;
+  }
+  if (!supportsDocumentPictureInPicture()) {
+    if (isLockInTimerWindow) {
+      showToast("Picture-in-Picture isn't available. Keep using this timer window; it may not stay on top.");
+      return;
+    }
+    const opened = openLockInTimerPopupFallback();
+    showToast(opened
+      ? "Picture-in-Picture is unavailable here. The timer opened in a separate window, but may not stay on top."
+      : "Picture-in-Picture is unavailable and the browser blocked the timer window. Allow pop-ups to continue.");
+    return;
+  }
+  try {
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 310, height: 150 });
+    lockInPictureInPictureWindow = pipWindow;
+    preparePictureInPictureWindow(
+      pipWindow,
+      "lockin-pip-host",
+      `<main class="lockin-pip">
+        <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(active.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
+        <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
+        <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
+        <div class="lockin-pip__actions"><button type="button" class="btn-secondary btn-sm" data-pip-pause>${active.isPaused ? "Resume" : "Pause"}</button><button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button></div>
+      </main>`
+    );
+    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
+      closeLockInPictureInPicture();
+      returnToQuestifyFromPopup();
+    });
+    pipWindow.document.querySelector("[data-pip-pause]")?.addEventListener("click", () => {
+      const current = getActiveLockIn();
+      if (!current) return;
+      current.isPaused ? resumeLockIn(current.id) : pauseLockIn(current.id);
+      renderView();
+    });
+    pipWindow.document.querySelector("[data-pip-add-time]")?.addEventListener("click", () => {
+      const current = getActiveLockIn();
+      if (!current) return;
+      addLockInTime(current.id, 10);
+      updateLockInTimerDisplay();
+    });
+    pipWindow.addEventListener("pagehide", () => {
+      if (lockInPictureInPictureWindow === pipWindow) {
+        lockInPictureInPictureWindow = null;
+        if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
+      }
+      updateLockInPictureInPictureButton();
+    }, { once: true });
+    setFloatingWidget("timer", { mode: "pip", kind: "lockin", id: active.id });
+    updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
+    updateLockInPictureInPictureButton();
+  } catch (error) {
+    console.error("Could not pin the Lock In timer:", error);
+    if (isLockInTimerWindow) {
+      showToast("The browser couldn't pin this timer. It remains usable in this separate window.");
+      return;
+    }
+    const opened = openLockInTimerPopupFallback();
+    showToast(opened
+      ? "The floating timer was unavailable. Opened a regular timer window; it may not stay on top."
+      : "The browser could not create a floating or separate timer window. Allow pop-ups and try again.");
+  }
 }
 
 function renderLockInTimerPopup() {
   const active = getActiveLockIn();
   if (!active) {
-    return `<section class="lockin-timer-window"><p class="dashboard-section__eyebrow">QUESTIFY FOCUS</p><h1>No active Lock In</h1><p class="text-muted">Start a focus session in Questify to use its timer pop-out.</p><button type="button" class="btn-secondary" data-timer-window-close>Close window</button></section>`;
+    return `<section class="lockin-timer-window"><header class="lockin-timer-window__header"><strong>No active Lock In</strong><button class="btn-secondary btn-sm" data-timer-window-close aria-label="Close timer window">×</button></header><p class="text-muted">Start a focus session in Questify to use its timer window.</p></section>`;
   }
   const elapsedSec = getLockInElapsedSeconds(active);
   return `
     <section class="lockin-timer-window" aria-label="Lock In timer pop-out">
       <header class="lockin-timer-window__header">
-        <span class="lockin-pip__mark" aria-hidden="true">Q</span>
-        <div><p class="dashboard-section__eyebrow">QUESTIFY FOCUS</p><strong>${escapeHTML(active.title)}</strong></div>
+        <strong>${escapeHTML(active.title)}</strong>
+        <button type="button" class="btn-secondary btn-sm" data-timer-pin aria-label="Pin timer above other windows">Pin</button>
         <button type="button" class="btn-secondary btn-sm" data-timer-window-close aria-label="Close timer window">×</button>
       </header>
       <div class="lockin-timer-window__readout" id="lockin-timer">${formatLockInClock(Math.max(0, active.targetMinutes * 60 - elapsedSec))}</div>
@@ -4597,7 +4751,6 @@ function renderLockInTimerPopup() {
         <button type="button" class="btn-secondary btn-sm" id="lockin-pause-btn" data-id="${escapeAttribute(active.id)}">${active.isPaused ? "Resume" : "Pause"}</button>
         <button type="button" class="btn-secondary btn-sm" id="lockin-add-time-btn" data-id="${escapeAttribute(active.id)}">+10 min</button>
       </div>
-      <p class="text-muted">This window controls the same timer shown in your Lock In view.</p>
     </section>
   `;
 }
@@ -4612,15 +4765,12 @@ function renderLockInPanel() {
           <span class="lockin-panel__badge">🔒 Lock In</span>
           <div class="lockin-panel__header-tools">
             <span id="lockin-status" class="lockin-status">Locked in...</span>
-            ${!isLockInTimerWindow
-              ? `<button type="button" class="btn-secondary btn-sm" id="lockin-picture-in-picture-btn">Pin timer pop-out ↗</button>`
-              : ""}
             ${!isLockInFocusWindow && !isLockInTimerWindow
               ? `<button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>`
               : ""}
           </div>
         </div>
-        <h3 class="lockin-panel__title">${escapeHTML(active.title)}</h3>
+        ${isLockInFocusWindow ? "" : `<h3 class="lockin-panel__title">${escapeHTML(active.title)}</h3>`}
         <div class="lockin-focus-clock">
           <svg class="lockin-focus-clock__dial" viewBox="0 0 120 120" role="progressbar" aria-label="Focus session progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <circle class="lockin-focus-clock__track" cx="60" cy="60" r="48"></circle>
@@ -4747,13 +4897,18 @@ function renderLockInPanel() {
 // Challenges: render a single card
 // -------------------------------------
 function renderChallengeCard(challenge) {
-  const difficulty = challenge.difficulty || "easy";
+  const difficulty = ["easy", "medium", "hard"].includes(challenge.difficulty)
+    ? challenge.difficulty
+    : "easy";
   const difficultyLabel = getDifficultyConfig(difficulty).label;
   const category = getCategoryConfig(challenge.category || "general");
   const scheduledDate = getChallengeScheduledDate(challenge);
-  const dateLabel = formatScheduledDateLabel(scheduledDate);
+  const dateLabel = escapeHTML(formatScheduledDateLabel(scheduledDate));
   const urgency = challenge.completed ? null : getUrgencyStatus(challenge);
   const recurrence = challenge.recurrence || "none";
+  const xpValue = Number.isFinite(Number(challenge.xpValue)) ? Number(challenge.xpValue) : 0;
+  const actualMinutes = Number.isFinite(Number(challenge.actualMinutes)) ? Number(challenge.actualMinutes) : 0;
+  const targetMinutes = Number.isFinite(Number(challenge.targetMinutes)) ? Number(challenge.targetMinutes) : 0;
 
   const urgencyTag =
     urgency === "overdue"
@@ -4787,10 +4942,10 @@ function renderChallengeCard(challenge) {
   }
 
   return `
-    <div class="card challenge-card ${challenge.completed ? "is-completed" : ""} ${challenge.archived ? "is-archived" : ""}" data-id="${challenge.id}">
+    <div class="card challenge-card ${challenge.completed ? "is-completed" : ""} ${challenge.archived ? "is-archived" : ""}" data-id="${escapeAttribute(challenge.id)}">
       <div class="challenge-card__info">
         <span class="challenge-card__title">${escapeHTML(challenge.title)}</span>
-        <span class="challenge-card__xp">+${challenge.xpValue} XP</span>
+        <span class="challenge-card__xp">+${xpValue} XP</span>
         <span class="difficulty-tag difficulty-${difficulty}">${difficultyLabel}</span>
         <span class="category-tag" title="${category.label}">${category.icon} ${category.label}</span>
         ${recurrenceTag}
@@ -4798,7 +4953,7 @@ function renderChallengeCard(challenge) {
         ${
           challenge.isLockIn
             ? `<span class="challenge-card__date">⏱️ ${
-                challenge.actualMinutes ? `Locked in ${challenge.actualMinutes}m` : `Target ${challenge.targetMinutes}m`
+                actualMinutes ? `Locked in ${actualMinutes}m` : `Target ${targetMinutes}m`
               }</span>`
             : ""
         }
@@ -4817,45 +4972,73 @@ function renderChallengeCard(challenge) {
 const TOUR_STEPS = [
   {
     view: "dashboard",
-    selector: ".dashboard-hero",
-    title: "Your day, at a glance",
-    body: "The dashboard brings today's progress, priorities, and momentum together. Start here to decide on your next small win.",
+    section: "Dashboard",
+    selector: ".dashboard-daily-review",
+    title: "Start with your Daily Review",
+    body: "Check today's habit progress, XP, streak, and weekly rhythm here. A check-in made on this card stays in sync with Habits and Calendar.",
   },
   {
     view: "dashboard",
+    section: "Dashboard",
     selector: ".dashboard-level-chip",
-    title: "Progress that builds",
-    body: "Challenges and habit check-ins earn XP. Your level and progress are always visible here.",
+    title: "See your progress build",
+    body: "Challenges and habit check-ins earn XP. Your level and progress are always visible from the dashboard.",
   },
   {
     view: "habits",
+    section: "Habits",
     selector: ".habit-manager-card",
-    title: "Make habits measurable",
-    body: "Create daily habits, choose their difficulty, and check in once per day. Editing keeps your history.",
+    title: "Build a routine that fits",
+    body: "Create, edit, archive, or check in to daily habits. Your check-ins sync with the dashboard and calendar; deleting a checked habit asks before its history is removed.",
   },
   {
     view: "habits",
+    section: "Habits",
     selector: ".habit-analytics-card",
-    title: "See your consistency",
-    body: "Daily, weekly, and monthly views summarize real check-ins, streaks, and missed habits.",
+    title: "Understand your consistency",
+    body: "Switch between daily, weekly, and monthly summaries to review check-ins, streaks, and missed days.",
   },
   {
     view: "calendar",
+    section: "Calendar",
     selector: ".calendar-view-heading",
-    title: "Review your history",
-    body: "The calendar brings habit activity, challenge completions, streaks, and earned XP into one timeline.",
+    title: "Explore your activity",
+    body: "Review habits, challenge completions, streaks, and XP together. Today is emphasized, future dates are dimmed, and habit updates stay in sync.",
+  },
+  {
+    view: "lockin",
+    section: "Lock In",
+    selector: ".lockin-duration-control",
+    title: "Set up a focused session",
+    body: "Name your session, choose a difficulty, and pick a 25, 45, 60, 90-minute, or custom focus block. You can mute Questify notifications for the session; use your device's Focus or Do Not Disturb mode for other apps.",
+  },
+  {
+    view: "notes",
+    section: "Sticky Notes",
+    selector: ".sticky-notes-heading",
+    title: "Keep ideas close",
+    body: "Create saved notes and open one in its own window. Pinning uses browser Picture-in-Picture where supported; otherwise the regular window remains available.",
   },
   {
     view: "badges",
+    section: "Badges",
     selector: ".badge-progress-summary",
-    title: "Celebrate milestones",
-    body: "Badges recognize progress and consistency. Your earned badges and next milestones live here.",
+    title: "Celebrate every kind of progress",
+    body: "Earn badges across Questify's habits, challenges, focus sessions, and other features. See what you've unlocked and what to work toward next.",
   },
   {
-    view: "challenges",
-    selector: ".lockin-panel",
-    title: "Choose a focus block",
-    body: "Locked-In sessions offer a timer and optional suppression of Questify's own notifications. System-wide silence must be enabled in your device's Focus or Do Not Disturb settings.",
+    view: "profile",
+    section: "Profile",
+    selector: ".profile-progress-section",
+    title: "Your stats in one place",
+    body: "Profile brings your personal details, XP, habit check-ins, challenge progress, badges, and activity history together.",
+  },
+  {
+    view: "settings",
+    section: "Settings",
+    selector: "[aria-labelledby='data-backup-title']",
+    title: "Keep your data backed up",
+    body: "Export a JSON backup or import one to restore your progress on this device. Import replaces the current local data, so export a copy first if you may need it.",
   },
 ];
 
@@ -4886,7 +5069,7 @@ function renderTourOverlay() {
     <div class="onboarding-tour-overlay" aria-hidden="true"></div>
     <section class="onboarding-tour-bubble card" id="onboarding-tour-bubble" role="dialog" aria-modal="false" aria-labelledby="tour-title" aria-describedby="tour-description">
       <div class="onboarding-tour-bubble__topline">
-        <span>QUESTIFY QUICK TOUR</span>
+        <span>${escapeHTML(step.section || "QUESTIFY QUICK TOUR")}</span>
         <span>${tourStep + 1} of ${TOUR_STEPS.length}</span>
       </div>
       <h2 id="tour-title">${escapeHTML(step.title)}</h2>
@@ -4909,7 +5092,15 @@ function positionTourOverlay() {
   const step = TOUR_STEPS[tourStep];
   const target = step && document.querySelector(step.selector);
   const bubble = document.getElementById("onboarding-tour-bubble");
-  if (!target || !bubble) return;
+  if (!bubble) return;
+  document.querySelectorAll(".tour-highlight").forEach((element) => {
+    if (element !== target) element.classList.remove("tour-highlight");
+  });
+  if (!target) {
+    bubble.style.left = `${Math.max(16, (window.innerWidth - bubble.offsetWidth) / 2)}px`;
+    bubble.style.top = `${Math.max(16, (window.innerHeight - bubble.offsetHeight) / 2)}px`;
+    return;
+  }
   target.classList.add("tour-highlight");
   if (target.closest("#app-header")) {
     document.getElementById("app-header").classList.add("is-tour-target");
@@ -5026,15 +5217,12 @@ function renderStickyNotePopup() {
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
   return `
     <section class="sticky-note-window" aria-label="Sticky note window">
-      <header class="sticky-note-window__brand">
-        <img src="logo.svg" alt="" width="28" height="28">
-        <div><p class="dashboard-section__eyebrow">QUESTIFY STICKY NOTE</p><h1>Quick thought space</h1></div>
-        <button type="button" class="btn-secondary btn-sm" data-note-window-close>Close</button>
-      </header>
       <article class="sticky-note-card sticky-note-card--window" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
         <div class="sticky-note-card__header">
           <span class="sticky-note-card__pin-indicator">Sticky note</span>
           <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
+          <button type="button" class="btn-secondary btn-sm" id="saved-note-pip-btn">${isSavedNotePictureInPictureOpen() ? "Unpin" : "Pin"}</button>
+          <button type="button" class="btn-secondary btn-sm" data-note-window-close aria-label="Close sticky note">×</button>
         </div>
         <label class="sr-only" for="note-window-title">Note title</label>
         <input id="note-window-title" class="sticky-note-card__title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" data-note-title="${escapeAttribute(note.id)}" aria-label="Note title">
@@ -5067,13 +5255,14 @@ function openStickyNoteWindow(noteId) {
   const noteWindow = window.open(
     noteUrl.toString(),
     `questify-sticky-note-${noteId}`,
-    "popup=yes,width=400,height=520,resizable=yes,scrollbars=yes"
+    "popup=yes,width=440,height=560,resizable=yes,scrollbars=no"
   );
   if (!noteWindow) {
-    showToast("Allow pop-ups to open this sticky note in its own window.");
-    return;
+    showToast("The sticky note stayed on this page because the browser blocked its separate window. Allow pop-ups to open it.");
+    return false;
   }
   noteWindow.focus();
+  return true;
 }
 
 function isSavedNotePictureInPictureOpen() {
@@ -5082,22 +5271,24 @@ function isSavedNotePictureInPictureOpen() {
 
 function updateSavedNotePictureInPictureButton() {
   const button = document.getElementById("saved-note-pip-btn");
-  const status = document.getElementById("saved-note-pip-status");
   if (button) {
-    button.textContent = isSavedNotePictureInPictureOpen()
-      ? "Close pop-out"
-      : "Open pop-out";
+    button.textContent = isSavedNotePictureInPictureOpen() &&
+      savedNotePictureInPictureNoteId === stickyNoteWindowId
+      ? "Unpin"
+      : "Pin";
   }
-  if (status) {
-    status.textContent = isSavedNotePictureInPictureOpen()
-      ? "Sticky note is open in its own browser window."
-      : "Open this note in its own browser window; always-on-top behavior depends on your browser and operating system.";
-  }
+  document.querySelectorAll("[data-note-pip]").forEach((noteButton) => {
+    noteButton.textContent = isSavedNotePictureInPictureOpen() &&
+      savedNotePictureInPictureNoteId === noteButton.dataset.notePip
+      ? "Unpin above windows"
+      : "Pin above windows";
+  });
 }
 
 function closeSavedNotePictureInPicture() {
   const pipWindow = savedNotePictureInPictureWindow;
   savedNotePictureInPictureWindow = null;
+  savedNotePictureInPictureNoteId = null;
   if (pipWindow && !pipWindow.closed) pipWindow.close();
   const noteWidget = getFloatingWidget("note");
   if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
@@ -5107,10 +5298,9 @@ function closeSavedNotePictureInPicture() {
 }
 
 function syncSavedNotePictureInPicture() {
-  if (!isStickyNoteWindow) return;
   const pipWindow = savedNotePictureInPictureWindow;
   if (!pipWindow || pipWindow.closed) return;
-  const note = state.notes.find((item) => item.id === stickyNoteWindowId);
+  const note = state.notes.find((item) => item.id === savedNotePictureInPictureNoteId);
   if (!note) {
     closeSavedNotePictureInPicture();
     return;
@@ -5124,6 +5314,7 @@ function syncSavedNotePictureInPicture() {
   pipWindow.document.body.style.setProperty("--lockin-note-color", color);
   pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+  pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   const title = pipWindow.document.getElementById("saved-note-pip-title");
   if (title && pipWindow.document.activeElement !== title) title.value = note.title;
   const content = pipWindow.document.getElementById("saved-note-pip-content");
@@ -5152,24 +5343,36 @@ function syncStickyNotePopupEditor(note) {
   document.title = `${note.title || "Sticky Note"} — Questify`;
 }
 
-async function toggleSavedNotePictureInPicture() {
-  if (isSavedNotePictureInPictureOpen()) {
+async function toggleSavedNotePictureInPicture(noteId = stickyNoteWindowId) {
+  if (isSavedNotePictureInPictureOpen() && savedNotePictureInPictureNoteId === noteId) {
     closeSavedNotePictureInPicture();
     return;
   }
-  const note = state.notes.find((item) => item.id === stickyNoteWindowId);
-  if (!note || !supportsDocumentPictureInPicture()) return;
+  if (isSavedNotePictureInPictureOpen()) closeSavedNotePictureInPicture();
+  const note = state.notes.find((item) => item.id === noteId);
+  if (!note) {
+    showToast("This sticky note could not be found.");
+    return;
+  }
+  if (!supportsDocumentPictureInPicture()) {
+    if (isStickyNoteWindow) {
+      showToast("This browser can't pin notes above other windows. Your note remains editable here.");
+    } else if (openStickyNoteWindow(noteId)) {
+      showToast("Picture-in-Picture isn't available. Opened the note in a separate window; it may not stay on top.");
+    }
+    return;
+  }
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
   try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 340, height: 390 });
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 310, height: 210 });
     savedNotePictureInPictureWindow = pipWindow;
-    pipWindow.document.title = "Questify Sticky Note";
+    savedNotePictureInPictureNoteId = note.id;
+    pipWindow.document.title = "Note";
     preparePictureInPictureWindow(
       pipWindow,
       "note-pip-host",
       `<main class="note-pip saved-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
-        <header><label for="saved-note-pip-title">Sticky note</label><button type="button" class="btn-secondary btn-sm note-pip__close" data-pip-close aria-label="Close floating note">×</button></header>
-        <input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title">
+        <header><input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title"><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
         <label class="sr-only" for="saved-note-pip-content">Note content</label>
         <textarea id="saved-note-pip-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
         <div class="sticky-note-card__colors" role="group" aria-label="Note color">
@@ -5177,13 +5380,12 @@ async function toggleSavedNotePictureInPicture() {
             <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
           `).join("")}
         </div>
-        <p id="saved-note-pip-updated">${escapeHTML(formatRelativeTime(note.updatedAt))} · saves automatically</p>
       </main>`
     );
     const titleInput = pipWindow.document.getElementById("saved-note-pip-title");
     const contentInput = pipWindow.document.getElementById("saved-note-pip-content");
     const updateNote = () => {
-      const current = state.notes.find((item) => item.id === stickyNoteWindowId);
+      const current = state.notes.find((item) => item.id === note.id);
       if (!current) {
         closeSavedNotePictureInPicture();
         return;
@@ -5198,12 +5400,16 @@ async function toggleSavedNotePictureInPicture() {
     titleInput?.addEventListener("input", updateNote);
     contentInput?.addEventListener("input", updateNote);
     pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
-      button.addEventListener("click", () => updateStickyNoteColor(stickyNoteWindowId, button.dataset.pipNoteColor));
+      button.addEventListener("click", () => updateStickyNoteColor(note.id, button.dataset.pipNoteColor));
     });
-    pipWindow.document.querySelector("[data-pip-close]")?.addEventListener("click", closeSavedNotePictureInPicture);
+    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
+      closeSavedNotePictureInPicture();
+      returnToQuestifyFromPopup();
+    });
     pipWindow.addEventListener("pagehide", () => {
       if (savedNotePictureInPictureWindow === pipWindow) {
         savedNotePictureInPictureWindow = null;
+        savedNotePictureInPictureNoteId = null;
         const noteWidget = getFloatingWidget("note");
         if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
           setFloatingWidget("note", null);
@@ -5216,8 +5422,12 @@ async function toggleSavedNotePictureInPicture() {
   } catch (error) {
     console.error("Could not open the saved note Picture-in-Picture window:", error);
     const status = document.getElementById("saved-note-pip-status");
-    if (status) status.textContent = "The floating note could not open. Your browser may limit simultaneous PiP windows.";
-    showToast("The floating note could not open. Check browser Picture-in-Picture support.");
+    if (status) status.textContent = "The floating note could not open. The browser may limit simultaneous PiP windows.";
+    if (!isStickyNoteWindow && openStickyNoteWindow(noteId)) {
+      showToast("The floating note could not open. Opened a regular note window, which may not stay on top.");
+    } else {
+      showToast("The browser could not pin this note. It remains editable in its current window.");
+    }
   }
 }
 
@@ -5229,6 +5439,7 @@ function attachStickyNotePopupHandlers() {
   document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
     input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
   });
+  document.getElementById("saved-note-pip-btn")?.addEventListener("click", toggleSavedNotePictureInPicture);
   document.querySelectorAll("[data-note-window-close]").forEach((button) => {
     button.addEventListener("click", closeStickyNoteWindow);
   });
@@ -5245,6 +5456,18 @@ function closeStickyNoteWindow() {
   window.location.replace(appUrl.toString());
 }
 
+function returnToQuestifyFromPopup() {
+  if (window.opener && !window.opener.closed) {
+    window.opener.focus();
+    window.close();
+    return;
+  }
+  const appUrl = new URL(window.location.href);
+  ["focus", "note", "timer", "session-note"].forEach((key) => appUrl.searchParams.delete(key));
+  appUrl.hash = "";
+  if (appUrl.href !== window.location.href) window.location.replace(appUrl.toString());
+}
+
 function renderStickyNoteCard(note) {
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
   const confirmingDelete = confirmingNoteDeleteId === note.id;
@@ -5253,6 +5476,8 @@ function renderStickyNoteCard(note) {
     pinnedNote.kind === "saved" &&
     pinnedNote.id === note.id &&
     pinnedNote.ownerId === appWindowId;
+  const isPinnedAboveWindows = isSavedNotePictureInPictureOpen() &&
+    savedNotePictureInPictureNoteId === note.id;
   return `
     <article class="sticky-note-card ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
       <div class="sticky-note-card__header">
@@ -5270,7 +5495,8 @@ function renderStickyNoteCard(note) {
         <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
       </div>
       <div class="sticky-note-card__actions">
-        <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinned ? "Unpin" : "Pin on screen"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinned ? "Unpin in Questify" : "Pin in Questify"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-pip="${escapeAttribute(note.id)}">${isPinnedAboveWindows ? "Unpin above windows" : "Pin above windows"}</button>
         <button type="button" class="btn-secondary btn-sm" data-note-open-window="${escapeAttribute(note.id)}">Open in window ↗</button>
         ${confirmingDelete
           ? `<span class="sticky-note-card__confirm">Delete this note?</span>
@@ -5313,6 +5539,9 @@ function attachStickyNotesHandlers() {
   });
   document.querySelectorAll("[data-note-open-window]").forEach((button) => {
     button.addEventListener("click", () => openStickyNoteWindow(button.dataset.noteOpenWindow));
+  });
+  document.querySelectorAll("[data-note-pip]").forEach((button) => {
+    button.addEventListener("click", () => toggleSavedNotePictureInPicture(button.dataset.notePip));
   });
   document.querySelectorAll("[data-note-pin-app]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5469,11 +5698,13 @@ const views = {
       </div>
     </section>
 
+    ${renderFirstTimeWelcomeCard()}
+
+    ${renderCalendarDayDetails(getTodayDateString(), "dashboard")}
+
     ${renderDashboardLockInCta()}
 
-    ${renderFirstTimeWelcomeCard()}
     ${renderResumeLockInBanner()}
-    ${renderDashboardHabitSummary()}
 
     <section class="dashboard-section" aria-labelledby="dashboard-today-title">
       <div class="dashboard-section__heading">
@@ -5910,6 +6141,19 @@ const views = {
       <p id="update-app-status" class="settings-update-status text-muted" role="status" aria-live="polite">Check for updates to see whether you have the latest version.</p>
     </div>
 
+    <section class="settings-section card" aria-labelledby="data-backup-title">
+      <div class="settings-card-heading">
+        <h3 id="data-backup-title">Import &amp; export data</h3>
+        <p class="text-muted">Save a backup of your habits, challenges, notes, settings, and progress, or restore a Questify JSON backup. Importing replaces the data on this device.</p>
+      </div>
+      <div class="settings-row settings-data-actions">
+        <button type="button" class="btn-secondary btn-sm" id="export-data-btn">Export data</button>
+        <button type="button" class="btn-secondary btn-sm" id="import-data-btn">Import data</button>
+        <input type="file" id="import-data-file" accept=".json,application/json" hidden>
+      </div>
+      <p id="data-backup-status" class="text-muted" role="status" aria-live="polite"></p>
+    </section>
+
     <section class="settings-section card navigation-preferences" aria-labelledby="navigation-preferences-title">
       <div class="settings-card-heading">
         <h3 id="navigation-preferences-title">Navigation preferences</h3>
@@ -6050,6 +6294,29 @@ const views = {
       </p>
       </section>
 
+      <section class="settings-section card" aria-labelledby="floating-window-settings-title">
+        <div class="settings-card-heading">
+          <h3 id="floating-window-settings-title">Floating windows</h3>
+          <p class="text-muted">Pin the timer and notes in compact browser Picture-in-Picture windows. Browser support controls their always-on-top behavior.</p>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div>Translucent appearance</div>
+            <div class="text-muted">Use a softly transparent surface for floating timers and sticky notes.</div>
+          </div>
+          <div
+            id="floating-transparency-switch"
+            class="theme-switch ${state.preferences.floatingWindowsTransparent ? "is-on" : ""}"
+            role="switch"
+            aria-checked="${state.preferences.floatingWindowsTransparent}"
+            aria-label="Toggle transparency for floating windows"
+            tabindex="0"
+          >
+            <div class="theme-switch__knob"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="settings-section card settings-privacy-card" aria-labelledby="settings-privacy-title">
         <div>
           <h3 id="settings-privacy-title">Your privacy</h3>
@@ -6064,7 +6331,7 @@ const views = {
     <section class="settings-section card tour-replay-card" aria-labelledby="tour-replay-title">
       <div>
         <h3 id="tour-replay-title">Product walkthrough</h3>
-        <p class="text-muted">Take a guided tour of the dashboard, habits, analytics, calendar, badges, and focus timer.</p>
+        <p class="text-muted">Tour Daily Review, synced habit tracking, Calendar, Lock In, Sticky Notes, badges, Profile, and data backups.</p>
       </div>
       <button type="button" id="replay-tour-btn" class="btn-secondary btn-sm">Replay tour</button>
     </section>
@@ -6162,6 +6429,7 @@ function attachDashboardHandlers() {
   // First-time user: Add First Challenge button
   const firstChallengeBtn = document.getElementById("first-challenge-btn");
   if (firstChallengeBtn) {
+    dismissFirstStepWelcome();
     firstChallengeBtn.addEventListener("click", () => {
       const added = addChallenge("Read for 5 minutes", "easy", getTodayDateString(), "learning");
       if (!added) {
@@ -6177,6 +6445,7 @@ function attachDashboardHandlers() {
   const customFirstChallengeBtn = document.getElementById("custom-first-challenge-btn");
   if (customFirstChallengeBtn) {
     customFirstChallengeBtn.addEventListener("click", () => {
+      dismissFirstStepWelcome();
       navigateTo("challenges");
     });
   }
@@ -6533,6 +6802,9 @@ function attachChallengesHandlers() {
     window.location.replace(appUrl.toString());
   });
   document.getElementById("lockin-picture-in-picture-btn")?.addEventListener("click", openLockInPictureInPicture);
+  document.querySelectorAll("[data-timer-pin]").forEach((button) => {
+    button.addEventListener("click", openLockInPictureInPicture);
+  });
   document.querySelectorAll("[data-timer-window-close], [data-session-note-window-close]").forEach((button) => {
     button.addEventListener("click", () => window.close());
   });
@@ -6789,6 +7061,89 @@ function closeAppUpdatePrompt() {
   appUpdatePrompt = null;
 }
 
+function getLastUpdatePromptDismissedAt() {
+  try {
+    const stored = Number(localStorage.getItem(UPDATE_REMINDER_STORAGE_KEY));
+    return Number.isFinite(stored) ? stored : 0;
+  } catch (error) {
+    console.error("Could not read the app update reminder schedule:", error);
+    return 0;
+  }
+}
+
+function rememberUpdatePromptDismissal() {
+  try {
+    localStorage.setItem(UPDATE_REMINDER_STORAGE_KEY, String(Date.now()));
+  } catch (error) {
+    console.error("Could not save the app update reminder schedule:", error);
+    showToast("Questify could not save your update reminder preference.");
+  }
+}
+
+function maybeShowAvailableAppUpdate(registration, isNewDeployment = false) {
+  if (!registration?.waiting || appUpdatePrompt || document.visibilityState === "hidden") return;
+  const lastDismissedAt = getLastUpdatePromptDismissedAt();
+  if (!isNewDeployment && lastDismissedAt &&
+      Date.now() - lastDismissedAt < UPDATE_REMINDER_INTERVAL_MS) return;
+  showAppUpdatePrompt(registration, null);
+}
+
+async function checkForAvailableAppUpdate(registration) {
+  if (!navigator.onLine || !registration ||
+      Date.now() - lastBackgroundUpdateCheckAt < 5 * 60 * 1000) return;
+  lastBackgroundUpdateCheckAt = Date.now();
+  try {
+    await registration.update();
+    maybeShowAvailableAppUpdate(registration);
+  } catch (error) {
+    console.warn("Background check for a Questify update failed:", error);
+  }
+}
+
+function initServiceWorkerUpdateNotifications() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.ready.then((registration) => {
+    appUpdateRegistration = registration;
+
+    const watchInstallingWorker = (worker) => {
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        if (worker.state === "installed" &&
+            registration.waiting &&
+            navigator.serviceWorker.controller) {
+          maybeShowAvailableAppUpdate(registration, true);
+        }
+      });
+    };
+
+    registration.addEventListener("updatefound", () => {
+      watchInstallingWorker(registration.installing);
+    });
+    watchInstallingWorker(registration.installing);
+    maybeShowAvailableAppUpdate(registration);
+
+    const checkForUpdates = () => checkForAvailableAppUpdate(registration);
+    window.addEventListener("online", checkForUpdates);
+    window.addEventListener("focus", checkForUpdates);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkForUpdates();
+    });
+    checkForUpdates();
+
+    if (!appUpdateCheckIntervalId) {
+      appUpdateCheckIntervalId = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
+    }
+    if (!appUpdateReminderIntervalId) {
+      appUpdateReminderIntervalId = setInterval(
+        () => maybeShowAvailableAppUpdate(appUpdateRegistration),
+        60 * 60 * 1000
+      );
+    }
+  }).catch((error) => {
+    console.warn("Could not initialize Questify deployment notifications:", error);
+  });
+}
+
 function activateAppUpdate(registration, button) {
   const waitingWorker = registration.waiting;
   if (!waitingWorker) {
@@ -6826,6 +7181,7 @@ function activateAppUpdate(registration, button) {
 }
 
 function showAppUpdatePrompt(registration, button) {
+  appUpdateRegistration = registration;
   closeAppUpdatePrompt();
   appUpdatePrompt = document.createElement("dialog");
   appUpdatePrompt.className = "app-update-dialog";
@@ -6843,6 +7199,7 @@ function showAppUpdatePrompt(registration, button) {
   document.body.append(appUpdatePrompt);
   appUpdatePrompt.querySelector("[data-update-keep]")?.addEventListener("click", () => {
     closeAppUpdatePrompt();
+    rememberUpdatePromptDismissal();
     setAppUpdateStatus("Update available. You can keep using this version and update later from Settings.");
     if (button) {
       button.disabled = false;
@@ -7031,7 +7388,119 @@ function initPullToRefresh() {
 // -------------------------------------
 // Wire up the settings view after it's rendered
 // -------------------------------------
+function setDataBackupStatus(message, isError = false) {
+  const status = document.getElementById("data-backup-status");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error-text", isError);
+}
+
+function exportQuestifyData() {
+  try {
+    const exportedAt = new Date();
+    const backup = {
+      format: "questify-backup",
+      version: 1,
+      exportedAt: exportedAt.toISOString(),
+      state,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `questify-backup-${exportedAt.toISOString().slice(0, 10)}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setDataBackupStatus("Backup downloaded.");
+  } catch (error) {
+    console.error("Could not export Questify data:", error);
+    setDataBackupStatus("Questify couldn't create the backup. Please try again.", true);
+  }
+}
+
+function getImportedQuestifyState(parsedData) {
+  const isRecord = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
+  if (!parsedData || typeof parsedData !== "object" || Array.isArray(parsedData)) {
+    throw new Error("The selected file is not a Questify backup.");
+  }
+  if (parsedData.format === "questify-backup" && parsedData.version !== 1) {
+    throw new Error("This Questify backup version is not supported.");
+  }
+
+  const importedState = parsedData.format === "questify-backup" ? parsedData.state : parsedData;
+  if (!isRecord(importedState) || !isRecord(importedState.user) ||
+      !Array.isArray(importedState.challenges) ||
+      !importedState.challenges.every(isRecord)) {
+    throw new Error("The selected file doesn't contain valid Questify data.");
+  }
+  if (importedState.user.name !== undefined && typeof importedState.user.name !== "string") {
+    throw new Error("The backup contains an invalid profile name.");
+  }
+  if (importedState.preferences !== undefined && !isRecord(importedState.preferences)) {
+    throw new Error("The backup contains invalid settings.");
+  }
+  for (const key of ["habits", "notes", "habitXpLedger", "notifications"]) {
+    if (importedState[key] !== undefined &&
+        (!Array.isArray(importedState[key]) || !importedState[key].every(isRecord))) {
+      throw new Error(`The backup contains invalid ${key} data.`);
+    }
+  }
+  if (importedState.unlockedBadgeIds !== undefined &&
+      (!Array.isArray(importedState.unlockedBadgeIds) ||
+       !importedState.unlockedBadgeIds.every((id) => typeof id === "string"))) {
+    throw new Error("The backup contains invalid badge data.");
+  }
+  return importedState;
+}
+
+async function importQuestifyData(file) {
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) {
+    setDataBackupStatus("That file is too large to import (maximum 5 MB).", true);
+    return;
+  }
+
+  try {
+    const parsedData = JSON.parse(await file.text());
+    const importedState = getImportedQuestifyState(parsedData);
+    if (!window.confirm("Import this backup and replace the Questify data currently saved on this device? This cannot be undone.")) {
+      setDataBackupStatus("Import cancelled. Your current data is unchanged.");
+      return;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(importedState));
+    lockInStateChannel?.postMessage({ type: "state-updated" });
+    setDataBackupStatus("Backup imported. Reloading Questify…");
+    window.setTimeout(() => window.location.reload(), 300);
+  } catch (error) {
+    console.error("Could not import Questify data:", error);
+    setDataBackupStatus(
+      error instanceof SyntaxError
+        ? "That file isn't valid JSON. Choose a Questify backup file and try again."
+        : error instanceof Error
+        ? error.name === "QuotaExceededError"
+          ? "This backup is too large for the browser's available storage. Your current data is unchanged."
+          : error.message
+        : "Questify couldn't import that file. Your current data is unchanged.",
+      true
+    );
+  }
+}
+
 function attachSettingsHandlers() {
+  document.getElementById("export-data-btn")?.addEventListener("click", exportQuestifyData);
+
+  const importDataButton = document.getElementById("import-data-btn");
+  const importDataInput = document.getElementById("import-data-file");
+  if (importDataButton && importDataInput) {
+    importDataButton.addEventListener("click", () => importDataInput.click());
+    importDataInput.addEventListener("change", async () => {
+      await importQuestifyData(importDataInput.files?.[0]);
+      importDataInput.value = "";
+    });
+  }
+
   document.querySelectorAll("[data-navigation-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.preferences.navigationMode = button.dataset.navigationMode;
@@ -7154,6 +7623,34 @@ function attachSettingsHandlers() {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         toggleBlockNotifications();
+      }
+    });
+  }
+
+  const floatingTransparencySwitch = document.getElementById("floating-transparency-switch");
+  if (floatingTransparencySwitch) {
+    const toggleFloatingTransparency = () => {
+      state.preferences.floatingWindowsTransparent = !state.preferences.floatingWindowsTransparent;
+      saveState();
+      lockInPictureInPictureWindow?.document.body.classList.toggle(
+        "is-floating-transparent",
+        state.preferences.floatingWindowsTransparent
+      );
+      sessionNotePictureInPictureWindow?.document.body.classList.toggle(
+        "is-floating-transparent",
+        state.preferences.floatingWindowsTransparent
+      );
+      savedNotePictureInPictureWindow?.document.body.classList.toggle(
+        "is-floating-transparent",
+        state.preferences.floatingWindowsTransparent
+      );
+      renderView();
+    };
+    floatingTransparencySwitch.addEventListener("click", toggleFloatingTransparency);
+    floatingTransparencySwitch.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleFloatingTransparency();
       }
     });
   }
@@ -7529,7 +8026,7 @@ function renderView() {
     const active = getActiveLockIn();
     document.title = `${active?.id === sessionNoteWindowId ? active.title : "Session Note"} — Questify`;
     mainEl.innerHTML = active?.id === sessionNoteWindowId
-      ? `<section class="session-note-window"><header><div><p class="dashboard-section__eyebrow">QUESTIFY LOCK IN</p><h1>${escapeHTML(active.title)}</h1></div><button type="button" class="btn-secondary btn-sm" data-session-note-window-close>Close</button></header>${renderLockInStickyNote()}</section>`
+      ? `<section class="session-note-window">${renderLockInStickyNote()}</section>`
       : `<section class="session-note-window"><h1>Session note unavailable</h1><p class="text-muted">This Lock In session has ended.</p><button type="button" class="btn-secondary" data-session-note-window-close>Close window</button></section>`;
     attachChallengesHandlers();
     return;
@@ -7788,6 +8285,7 @@ window.addEventListener("popstate", (event) => {
 // Initial load
 // -------------------------------------
 function init() {
+  initServiceWorkerUpdateNotifications();
   loadState();
   previouslyOnboarded = isOnboarded();
   isSidebarCollapsed = Boolean(state.preferences.sidebarCollapsed);

@@ -376,6 +376,593 @@ body.is-lockin-focus-window .lockin-open-window-btn {
   display: none;
 }
 
+body.is-lockin-focus-window,
+body.is-sticky-note-window,
+body.is-lockin-timer-window,
+body.is-session-note-window {
+  width: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window #app,
+body.is-sticky-note-window #app,
+body.is-lockin-timer-window #app,
+body.is-session-note-window #app {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .app-main,
+body.is-sticky-note-window .app-main,
+body.is-lockin-timer-window .app-main,
+body.is-session-note-window .app-main {
+  width: 100%;
+  min-width: 0;
+  height: 100dvh;
+  min-height: 0;
+  padding: clamp(4px, 1.2dvh, 9px);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-focus-window {
+  display: grid;
+  width: min(100%, 560px);
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  justify-self: center;
+  gap: clamp(3px, 0.8dvh, 7px);
+}
+
+body.is-lockin-focus-window .lockin-focus-window__header {
+  min-width: 0;
+  gap: clamp(3px, 1vw, 8px);
+  padding-block: 0;
+}
+
+body.is-lockin-focus-window .lockin-focus-window__header > button {
+  min-height: clamp(28px, 5dvh, 36px);
+  padding: 0.2rem clamp(0.35rem, 1.5vw, 0.65rem);
+  font-size: clamp(0.62rem, 1.6dvh, 0.75rem);
+}
+
+body.is-lockin-focus-window .lockin-panel--active {
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
+  gap: clamp(3px, 0.8dvh, 7px);
+  padding: clamp(6px, 1.5dvh, 12px);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-panel__header {
+  min-width: 0;
+  gap: 4px;
+}
+
+body.is-lockin-focus-window .lockin-panel__badge,
+body.is-lockin-focus-window .lockin-status {
+  font-size: clamp(0.62rem, 1.7dvh, 0.78rem);
+}
+
+body.is-lockin-focus-window .lockin-panel__header-tools {
+  min-width: 0;
+  gap: 3px;
+}
+
+body.is-lockin-focus-window .lockin-focus-clock {
+  width: clamp(76px, 19dvh, 142px);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+body.is-lockin-focus-window .lockin-focus-clock__readout {
+  gap: 1px;
+}
+
+body.is-lockin-focus-window .lockin-timer {
+  font-size: clamp(0.68rem, 2dvh, 0.9rem);
+}
+
+body.is-lockin-focus-window .lockin-xp-preview {
+  font-size: clamp(0.56rem, 1.5dvh, 0.7rem);
+}
+
+body.is-lockin-focus-window .lockin-focus-controls {
+  min-width: 0;
+  gap: 5px;
+  padding: clamp(4px, 0.9dvh, 7px);
+}
+
+body.is-lockin-focus-window .lockin-focus-controls__copy {
+  min-width: 0;
+  gap: 1px;
+}
+
+body.is-lockin-focus-window .lockin-focus-controls__copy strong {
+  font-size: clamp(0.64rem, 1.7dvh, 0.78rem);
+}
+
+body.is-lockin-focus-window .lockin-focus-controls__copy > span,
+body.is-lockin-focus-window .focus-os-guidance p {
+  font-size: clamp(0.54rem, 1.35dvh, 0.65rem);
+  line-height: 1.25;
+}
+
+body.is-lockin-focus-window .focus-os-guidance summary {
+  font-size: clamp(0.58rem, 1.45dvh, 0.68rem);
+}
+
+body.is-lockin-focus-window .lockin-panel__actions {
+  min-width: 0;
+  gap: 4px;
+}
+
+body.is-lockin-focus-window .lockin-panel__actions button {
+  min-width: 0;
+  min-height: clamp(28px, 5dvh, 36px);
+  padding: 0.2rem 0.45rem;
+  font-size: clamp(0.6rem, 1.55dvh, 0.72rem);
+}
+
+body.is-lockin-focus-window .lockin-sticky-note {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: clamp(3px, 0.7dvh, 6px);
+  margin: 0;
+  padding: clamp(5px, 1.1dvh, 9px);
+}
+
+body.is-lockin-focus-window .lockin-sticky-note__top {
+  min-width: 0;
+  gap: 3px;
+}
+
+body.is-lockin-focus-window .lockin-sticky-note__top label,
+body.is-lockin-focus-window .lockin-sticky-note__top span {
+  font-size: clamp(0.62rem, 1.6dvh, 0.75rem);
+}
+
+body.is-lockin-focus-window .lockin-sticky-note textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0.35rem;
+  font-size: clamp(0.62rem, 1.6dvh, 0.76rem);
+  resize: none;
+}
+
+body.is-lockin-focus-window .lockin-sticky-note__tools,
+body.is-lockin-focus-window .lockin-note-actions {
+  min-width: 0;
+  gap: 4px;
+}
+
+body.is-lockin-focus-window .lockin-sticky-note__tools button,
+body.is-lockin-focus-window .lockin-note-actions button,
+body.is-lockin-focus-window .lockin-sticky-note__custom {
+  min-height: 26px;
+  font-size: clamp(0.58rem, 1.45dvh, 0.68rem);
+}
+
+body.is-sticky-note-window .sticky-note-window {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
+body.is-sticky-note-window .sticky-note-window .sticky-note-card--window {
+  min-width: 0;
+  padding: clamp(5px, 1.5dvh, 12px);
+  gap: clamp(3px, 0.9dvh, 7px);
+}
+
+body.is-sticky-note-window .sticky-note-card__header {
+  min-width: 0;
+  gap: 3px;
+}
+
+body.is-sticky-note-window .sticky-note-card__header > span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: clamp(0.58rem, 1.5dvh, 0.72rem);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.is-sticky-note-window .sticky-note-card__header > button {
+  min-height: clamp(26px, 4.5dvh, 32px);
+  padding: 0.15rem clamp(0.3rem, 1vw, 0.5rem);
+  font-size: clamp(0.58rem, 1.4dvh, 0.68rem);
+}
+
+body.is-sticky-note-window .sticky-note-card__title {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: clamp(28px, 5dvh, 38px);
+  padding-block: 0.25rem;
+  font-size: clamp(0.82rem, 2.2dvh, 1rem);
+}
+
+body.is-sticky-note-window .sticky-note-card--window textarea {
+  min-height: 0;
+  padding: 0.35rem;
+  font-size: clamp(0.68rem, 1.8dvh, 0.85rem);
+}
+
+body.is-sticky-note-window .sticky-note-card__colors {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+body.is-sticky-note-window .sticky-note-window__sync {
+  font-size: clamp(0.56rem, 1.35dvh, 0.66rem);
+}
+
+body.is-session-note-window .session-note-window {
+  width: min(100%, 430px);
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
+body.is-session-note-window .session-note-window .lockin-sticky-note {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: clamp(3px, 0.8dvh, 7px);
+  padding: clamp(5px, 1.5dvh, 12px);
+}
+
+body.is-session-note-window .lockin-sticky-note textarea {
+  min-height: 0;
+  font-size: clamp(0.68rem, 1.8dvh, 0.85rem);
+}
+
+body.is-lockin-timer-window .lockin-timer-window {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto 4px auto;
+  align-content: stretch;
+  gap: clamp(3px, 1dvh, 8px);
+  padding: clamp(5px, 1.8dvh, 12px);
+}
+
+body.is-lockin-timer-window .lockin-timer-window__header {
+  min-width: 0;
+  gap: 3px;
+}
+
+body.is-lockin-timer-window .lockin-timer-window__header > button {
+  min-height: clamp(26px, 4.5dvh, 32px);
+  padding: 0.15rem 0.4rem;
+  font-size: clamp(0.58rem, 1.4dvh, 0.68rem);
+}
+
+body.is-lockin-timer-window .lockin-timer-window__readout {
+  align-self: center;
+  font-size: clamp(1.05rem, 10dvh, 2rem);
+}
+
+body.is-lockin-timer-window .lockin-timer-window > .lockin-status,
+body.is-lockin-timer-window .lockin-timer-window > .text-muted {
+  font-size: clamp(0.58rem, 1.6dvh, 0.72rem);
+}
+
+body.is-lockin-timer-window .lockin-timer-window__actions {
+  min-width: 0;
+  gap: 4px;
+}
+
+body.is-lockin-timer-window .lockin-timer-window__actions > button {
+  min-width: 0;
+  min-height: clamp(27px, 4.8dvh, 34px);
+  padding: 0.15rem 0.35rem;
+  font-size: clamp(0.58rem, 1.5dvh, 0.7rem);
+}
+
+.lockin-pip-host,
+.note-pip-host {
+  width: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: clamp(4px, 1.2dvh, 8px);
+}
+
+.lockin-pip,
+.note-pip {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  gap: clamp(3px, 0.8dvh, 6px);
+  padding: clamp(5px, 1.5dvh, 9px);
+}
+
+.lockin-pip {
+  grid-template-rows: auto minmax(0, 1fr) 4px auto;
+}
+
+.lockin-pip__timer {
+  align-self: center;
+  font-size: clamp(0.9rem, 8dvh, 1.35rem);
+}
+
+.lockin-pip__actions button,
+.lockin-pip__header button,
+.note-pip > header button {
+  min-width: 0;
+  min-height: clamp(24px, 4dvh, 30px);
+  padding: 0.12rem 0.35rem;
+  font-size: clamp(0.55rem, 1.35dvh, 0.66rem);
+}
+
+.note-pip {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.note-pip > header {
+  min-width: 0;
+}
+
+.note-pip > header input {
+  min-height: clamp(24px, 4dvh, 30px);
+  padding: 0.2rem 0.35rem;
+  font-size: clamp(0.62rem, 1.5dvh, 0.72rem);
+}
+
+.note-pip textarea {
+  min-height: 0;
+  font-size: clamp(0.62rem, 1.5dvh, 0.75rem);
+}
+
+.note-pip .sticky-note-card__colors {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+@media (max-height: 560px) {
+  body.is-lockin-focus-window .lockin-focus-controls__copy > span,
+  body.is-lockin-focus-window .focus-os-guidance,
+  body.is-lockin-focus-window .lockin-note-hint,
+  body.is-sticky-note-window .sticky-note-window__sync {
+    display: none;
+  }
+
+  body.is-lockin-focus-window .lockin-focus-clock {
+    width: clamp(64px, 15dvh, 84px);
+  }
+
+  body.is-lockin-focus-window .lockin-sticky-note {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  body.is-lockin-focus-window .lockin-note-actions {
+    display: none;
+  }
+
+  body.is-sticky-note-window .sticky-note-card--window {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+}
+
+.welcome-card.first-time-welcome {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0.75rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+}
+
+.first-time-welcome .welcome-card__copy > p {
+  margin-bottom: 0.75rem;
+}
+
+.first-time-welcome .welcome-card__actions {
+  min-width: 0;
+  flex-direction: row;
+  gap: 0.55rem;
+}
+
+.first-time-welcome .welcome-card__actions button {
+  min-width: 0;
+  flex: 1;
+}
+
+body.is-lockin-focus-window .lockin-focus-window.is-setup {
+  height: auto;
+  max-height: calc(100dvh - 1rem);
+  grid-template-rows: auto auto;
+  align-self: center;
+}
+
+body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) {
+  height: auto;
+  min-height: 0;
+  max-height: calc(100dvh - 5rem);
+  grid-template-rows: none;
+  align-content: start;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+@media (max-width: 340px) {
+  body.is-lockin-focus-window .lockin-focus-window__header > button {
+    padding-inline: 0.25rem;
+  }
+
+  body.is-lockin-focus-window .lockin-panel--active,
+  body.is-sticky-note-window .sticky-note-window .sticky-note-card--window,
+  body.is-session-note-window .session-note-window .lockin-sticky-note,
+  body.is-lockin-timer-window .lockin-timer-window {
+    padding: 4px;
+  }
+
+  body.is-sticky-note-window .sticky-note-card__updated {
+    display: none;
+  }
+}
+
+.settings-data-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: clamp(4px, 1dvh, 8px);
+  padding: clamp(7px, 1.8dvh, 14px);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) .lockin-panel__header {
+  min-width: 0;
+}
+
+body.is-lockin-focus-window .lockin-panel__description {
+  font-size: clamp(0.66rem, 1.8dvh, 0.82rem);
+  line-height: 1.35;
+}
+
+body.is-lockin-focus-window .lockin-start-form {
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(105px, 0.55fr);
+  align-content: start;
+  gap: clamp(4px, 1dvh, 8px);
+}
+
+body.is-lockin-focus-window .lockin-start-form > input[type="text"],
+body.is-lockin-focus-window .lockin-start-form__difficulty .difficulty-select {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: clamp(32px, 5.2dvh, 40px);
+  padding: 0.3rem 0.5rem;
+  font-size: clamp(0.68rem, 1.8dvh, 0.82rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-control {
+  grid-column: 1 / -1;
+}
+
+body.is-lockin-focus-window .lockin-duration-control__heading {
+  margin-bottom: 4px;
+  font-size: clamp(0.68rem, 1.8dvh, 0.82rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-control__heading .text-muted {
+  font-size: clamp(0.58rem, 1.5dvh, 0.68rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-options {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+}
+
+body.is-lockin-focus-window .lockin-duration-option {
+  min-width: 0;
+  min-height: clamp(30px, 5.2dvh, 40px);
+  padding: 0.2rem 0.1rem;
+  font-size: clamp(0.58rem, 1.5dvh, 0.7rem);
+  white-space: nowrap;
+}
+
+body.is-lockin-focus-window .lockin-custom-input {
+  min-height: clamp(32px, 5.2dvh, 40px);
+  margin-top: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: clamp(0.66rem, 1.7dvh, 0.8rem);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet {
+  grid-column: 1 / -1;
+  gap: 4px;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet > label {
+  align-items: center;
+  gap: 0.45rem;
+  padding: clamp(5px, 1.2dvh, 9px);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet input {
+  width: 0.95rem;
+  min-height: 0.95rem;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet label span {
+  min-width: 0;
+  gap: 2px;
+  font-size: clamp(0.65rem, 1.7dvh, 0.78rem);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet small {
+  font-size: clamp(0.55rem, 1.4dvh, 0.65rem);
+  line-height: 1.2;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet .focus-os-guidance summary {
+  font-size: clamp(0.58rem, 1.5dvh, 0.68rem);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet .focus-os-guidance p {
+  font-size: clamp(0.54rem, 1.35dvh, 0.62rem);
+}
+
+body.is-lockin-focus-window .lockin-start-form__submit {
+  grid-column: 1 / -1;
+  min-height: clamp(32px, 5.4dvh, 42px);
+  padding: 0.25rem 0.6rem;
+  font-size: clamp(0.66rem, 1.7dvh, 0.78rem);
+}
+
+body.is-lockin-focus-window #lockin-error {
+  min-height: 0;
+  margin: 0;
+  font-size: clamp(0.56rem, 1.4dvh, 0.66rem);
+}
+
+@media (max-height: 560px) {
+  body.is-lockin-focus-window .lockin-panel__description,
+  body.is-lockin-focus-window .lockin-start-quiet small {
+    display: none;
+  }
+
+  body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) {
+    gap: 3px;
+    padding: 5px;
+  }
+
+  body.is-lockin-focus-window .lockin-start-form {
+    gap: 3px;
+  }
+}
+
 body.is-lockin-focus-window .lockin-panel--active {
   width: 100%;
   padding: clamp(0.9rem, 3vw, 1.5rem);
@@ -9143,5 +9730,689 @@ body.is-lockin-focus-window .lockin-panel__actions button {
   .lockin-timer-window,
   .session-note-window {
     animation: none;
+  }
+}
+
+.lockin-pip-host,
+.note-pip-host {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 6px;
+}
+
+.lockin-pip {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-content: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 12px;
+}
+
+.lockin-pip__header {
+  min-width: 0;
+  justify-content: space-between;
+}
+
+.lockin-pip__header strong {
+  overflow: hidden;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lockin-pip__header button,
+.lockin-pip__actions button,
+.note-pip > header button {
+  min-height: 30px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.72rem;
+}
+
+.lockin-pip__timer {
+  font-size: 1.15rem;
+  line-height: 1.1;
+}
+
+.lockin-pip__actions {
+  gap: 6px;
+}
+
+.lockin-pip__track {
+  height: 4px;
+}
+
+.note-pip {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 12px;
+}
+
+.note-pip > header {
+  gap: 6px;
+  padding: 0;
+  border: 0;
+}
+
+.note-pip > header input {
+  min-width: 0;
+  min-height: 30px;
+  flex: 1;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.76rem;
+}
+
+.note-pip textarea {
+  min-height: 0;
+  height: 100%;
+  padding: 0.4rem 0.5rem;
+  resize: none;
+  font-size: 0.82rem;
+}
+
+.note-pip .sticky-note-card__colors {
+  gap: 0.35rem;
+  padding: 0;
+  border: 0;
+}
+
+body.is-floating-transparent.lockin-pip-host,
+body.is-floating-transparent.note-pip-host {
+  background: transparent;
+}
+
+body.is-floating-transparent .lockin-pip {
+  border-color: color-mix(in srgb, var(--color-border-glass) 65%, transparent);
+  background: color-mix(in srgb, var(--color-surface) 68%, transparent);
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+body.is-floating-transparent .note-pip {
+  border-color: color-mix(in srgb, var(--lockin-note-ink, #302817) 18%, transparent);
+  background: color-mix(in srgb, var(--lockin-note-color, #fff1a8) 72%, transparent);
+  backdrop-filter: blur(14px) saturate(130%);
+}
+
+body.is-floating-transparent .note-pip input,
+body.is-floating-transparent .note-pip textarea {
+  background: color-mix(in srgb, var(--lockin-note-color, #fff1a8) 52%, transparent);
+}
+
+.calendar-month-view .calendar-day.is-future,
+.week-day-card.is-future {
+  opacity: 0.48;
+  filter: saturate(0.7);
+}
+
+.calendar-month-view .calendar-day.is-future:hover,
+.calendar-month-view .calendar-day.is-future:focus-visible,
+.week-day-card.is-future:hover,
+.week-day-card.is-future:focus-visible {
+  opacity: 0.72;
+}
+
+.calendar-month-view .calendar-day.is-today {
+  z-index: 1;
+  border-color: var(--color-primary-light);
+  outline: 3px solid color-mix(in srgb, var(--color-primary-light) 75%, transparent);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--color-primary-light) 24%, var(--color-surface-solid));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary-light) 18%, transparent);
+  color: var(--color-text);
+  font-weight: 800;
+}
+
+.week-day-card.is-today {
+  border-color: var(--color-primary-light);
+  outline: 3px solid color-mix(in srgb, var(--color-primary-light) 75%, transparent);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--color-primary-light) 18%, var(--color-surface));
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--color-primary-light) 18%, transparent);
+}
+
+.week-day-card.is-today .week-day-number {
+  color: var(--color-primary-light);
+  font-size: 1rem;
+}
+
+.dashboard-daily-review {
+  position: relative;
+  border-color: color-mix(in srgb, var(--color-primary-light) 50%, var(--color-border-glass));
+  background:
+    radial-gradient(ellipse at 100% 0, color-mix(in srgb, var(--color-primary-light) 14%, transparent), transparent 58%),
+    var(--color-surface);
+  box-shadow:
+    0 14px 36px color-mix(in srgb, var(--color-primary-light) 12%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.dashboard-daily-review .calendar-day-details__header h3 {
+  font-size: clamp(1.35rem, 2.4vw, 1.8rem);
+}
+
+.dashboard-daily-review .calendar-day-details__stats > div {
+  background: color-mix(in srgb, var(--color-surface-alt) 88%, transparent);
+}
+
+.dashboard-daily-review .calendar-day-details__stats strong {
+  color: var(--color-primary-light);
+  font-size: clamp(1.25rem, 2.5vw, 1.65rem);
+}
+
+@media (max-width: 520px) {
+  .dashboard-daily-review .calendar-day-details__header {
+    align-items: center;
+  }
+
+  .dashboard-daily-review .calendar-day-details__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+body.is-sticky-note-window,
+body.is-session-note-window,
+body.is-lockin-timer-window {
+  overflow: hidden;
+}
+
+body.is-sticky-note-window .app-main,
+body.is-session-note-window .app-main,
+body.is-lockin-timer-window .app-main {
+  box-sizing: border-box;
+  min-height: 0;
+  height: 100dvh;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.sticky-note-window {
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+  padding: 0;
+}
+
+.sticky-note-window .sticky-note-card--window {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  align-content: stretch;
+  gap: 0.6rem;
+  padding: 0.9rem;
+}
+
+.sticky-note-window .sticky-note-card__header {
+  flex-wrap: nowrap;
+  gap: 0.35rem;
+}
+
+.sticky-note-window .sticky-note-card__header > button {
+  min-height: 30px;
+  padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+}
+
+.sticky-note-window .sticky-note-card--window textarea {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  resize: none;
+}
+
+.sticky-note-window__sync {
+  line-height: 1.25;
+}
+
+.lockin-focus-window {
+  gap: 0.4rem;
+  padding: 0;
+}
+
+.lockin-focus-window__header {
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0;
+}
+
+.lockin-focus-window__brand {
+  min-width: 0;
+  flex: 1;
+}
+
+.lockin-focus-window__brand h1 {
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lockin-focus-window__brand .dashboard-section__eyebrow {
+  font-size: 0.56rem;
+}
+
+body.is-lockin-focus-window .app-main {
+  box-sizing: border-box;
+  height: 100dvh;
+  min-height: 0;
+  align-content: start;
+  padding: 8px;
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-panel--active {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.8rem;
+  border-radius: 17px;
+}
+
+body.is-lockin-focus-window .lockin-panel__header {
+  align-items: center;
+}
+
+body.is-lockin-focus-window .lockin-panel__header-tools {
+  align-items: center;
+}
+
+body.is-lockin-focus-window .lockin-focus-clock {
+  width: 142px;
+  margin: 0 auto;
+}
+
+body.is-lockin-focus-window .lockin-focus-controls {
+  padding: 0.55rem;
+}
+
+body.is-lockin-focus-window .lockin-focus-controls__copy > span {
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+body.is-lockin-focus-window .lockin-panel__actions {
+  gap: 0.45rem;
+}
+
+body.is-lockin-focus-window .lockin-panel__actions button {
+  min-height: 36px;
+}
+
+body.is-session-note-window .session-note-window {
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+}
+
+body.is-session-note-window .session-note-window .lockin-sticky-note {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  align-content: stretch;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.9rem;
+}
+
+body.is-session-note-window .lockin-sticky-note__top {
+  gap: 0.35rem;
+}
+
+body.is-session-note-window .lockin-sticky-note__top label {
+  flex: 1;
+}
+
+body.is-session-note-window .lockin-sticky-note__top button {
+  min-height: 30px;
+  padding: 0.25rem 0.5rem;
+}
+
+body.is-session-note-window .lockin-sticky-note textarea {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  resize: none;
+}
+
+.lockin-timer-window {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 14px;
+}
+
+.lockin-timer-window__header {
+  gap: 0.35rem;
+}
+
+.lockin-timer-window__header strong {
+  min-width: 0;
+  flex: 1;
+  font-size: 0.82rem;
+}
+
+.lockin-timer-window__readout {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.lockin-timer-window__actions > button {
+  min-height: 36px;
+}
+
+body.is-lockin-focus-window .lockin-open-window-btn {
+  display: none;
+}
+
+body.is-lockin-focus-window #app,
+body.is-sticky-note-window #app,
+body.is-lockin-timer-window #app,
+body.is-session-note-window #app {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100dvh;
+  min-height: 0;
+}
+
+body.is-lockin-focus-window .app-main,
+body.is-sticky-note-window .app-main,
+body.is-lockin-timer-window .app-main,
+body.is-session-note-window .app-main {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  height: 100dvh;
+  min-height: 0;
+  padding: clamp(4px, 1.2dvh, 8px);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-focus-window {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(100%, 560px);
+  height: 100%;
+  min-height: 0;
+  align-content: stretch;
+  justify-self: center;
+  gap: clamp(3px, 0.8dvh, 6px);
+}
+
+body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-content: stretch;
+  gap: clamp(3px, 0.8dvh, 7px);
+  padding: clamp(6px, 1.5dvh, 12px);
+  overflow: hidden;
+}
+
+body.is-lockin-focus-window .lockin-panel:not(.lockin-panel--active) .lockin-panel__header {
+  min-width: 0;
+}
+
+body.is-lockin-focus-window .lockin-panel__description {
+  font-size: clamp(0.62rem, 1.7dvh, 0.8rem);
+  line-height: 1.3;
+}
+
+body.is-lockin-focus-window .lockin-start-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(100px, 0.55fr);
+  align-content: start;
+  min-width: 0;
+  min-height: 0;
+  gap: clamp(3px, 0.8dvh, 6px);
+}
+
+body.is-lockin-focus-window .lockin-start-form__difficulty {
+  grid-column: 2;
+  min-width: 0;
+}
+
+body.is-lockin-focus-window .lockin-start-form > input[type="text"],
+body.is-lockin-focus-window .lockin-start-form__difficulty .difficulty-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: clamp(30px, 5dvh, 38px);
+  padding: 0.25rem 0.45rem;
+  font-size: clamp(0.65rem, 1.7dvh, 0.8rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-control,
+body.is-lockin-focus-window .lockin-start-quiet,
+body.is-lockin-focus-window .lockin-start-form__submit {
+  grid-column: 1 / -1;
+}
+
+body.is-lockin-focus-window .lockin-duration-control__heading {
+  margin-bottom: 3px;
+  font-size: clamp(0.65rem, 1.7dvh, 0.8rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-control__heading .text-muted {
+  font-size: clamp(0.55rem, 1.4dvh, 0.65rem);
+}
+
+body.is-lockin-focus-window .lockin-duration-options {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px;
+}
+
+body.is-lockin-focus-window .lockin-duration-option {
+  min-width: 0;
+  min-height: clamp(28px, 4.8dvh, 36px);
+  padding: 0.15rem 0.05rem;
+  font-size: clamp(0.54rem, 1.35dvh, 0.66rem);
+  white-space: nowrap;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet {
+  gap: 3px;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet > label {
+  align-items: center;
+  gap: 0.4rem;
+  padding: clamp(4px, 0.9dvh, 7px);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet input {
+  width: 0.9rem;
+  min-height: 0.9rem;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet label span {
+  min-width: 0;
+  gap: 2px;
+  font-size: clamp(0.62rem, 1.6dvh, 0.75rem);
+}
+
+body.is-lockin-focus-window .lockin-start-quiet small,
+body.is-lockin-focus-window .lockin-start-quiet .focus-os-guidance p {
+  font-size: clamp(0.52rem, 1.3dvh, 0.62rem);
+  line-height: 1.2;
+}
+
+body.is-lockin-focus-window .lockin-start-quiet .focus-os-guidance summary {
+  font-size: clamp(0.55rem, 1.4dvh, 0.66rem);
+}
+
+body.is-lockin-focus-window .lockin-start-form__submit {
+  min-height: clamp(30px, 5dvh, 38px);
+  padding: 0.2rem 0.5rem;
+  font-size: clamp(0.62rem, 1.6dvh, 0.75rem);
+}
+
+body.is-lockin-focus-window #lockin-error {
+  min-height: 0;
+  margin: 0;
+}
+
+body.is-lockin-focus-window .lockin-panel--active {
+  min-height: 0;
+  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
+  gap: clamp(3px, 0.7dvh, 6px);
+  padding: clamp(6px, 1.5dvh, 12px);
+}
+
+body.is-lockin-focus-window .lockin-focus-clock {
+  width: clamp(68px, 18dvh, 136px);
+  margin: 0 auto;
+}
+
+body.is-lockin-focus-window .lockin-sticky-note {
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: clamp(3px, 0.7dvh, 6px);
+  margin: 0;
+  padding: clamp(5px, 1dvh, 8px);
+}
+
+body.is-lockin-focus-window .lockin-sticky-note textarea,
+body.is-session-note-window .lockin-sticky-note textarea,
+body.is-sticky-note-window .sticky-note-card--window textarea {
+  box-sizing: border-box;
+  min-height: 0;
+  height: 100%;
+  resize: none;
+}
+
+body.is-sticky-note-window .sticky-note-window {
+  height: 100%;
+  min-height: 0;
+}
+
+body.is-sticky-note-window .sticky-note-window .sticky-note-card--window {
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: clamp(3px, 0.8dvh, 6px);
+  padding: clamp(5px, 1.2dvh, 10px);
+}
+
+body.is-session-note-window .session-note-window,
+body.is-session-note-window .session-note-window .lockin-sticky-note {
+  height: 100%;
+  min-height: 0;
+}
+
+body.is-lockin-timer-window .lockin-timer-window {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto 4px auto;
+  align-content: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  gap: clamp(3px, 0.8dvh, 7px);
+  padding: clamp(5px, 1.4dvh, 10px);
+}
+
+body.is-lockin-timer-window .lockin-timer-window__readout {
+  align-self: center;
+  font-size: clamp(1rem, 9dvh, 1.8rem);
+}
+
+.lockin-pip-host,
+.note-pip-host {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lockin-pip,
+.note-pip {
+  height: 100%;
+  min-height: 0;
+  gap: clamp(3px, 0.8dvh, 6px);
+}
+
+.lockin-pip {
+  grid-template-rows: auto minmax(0, 1fr) 4px auto;
+}
+
+.lockin-pip__timer {
+  align-self: center;
+  font-size: clamp(0.9rem, 8dvh, 1.35rem);
+}
+
+.note-pip {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.note-pip textarea {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (max-height: 560px) {
+  body.is-lockin-focus-window .lockin-panel__description,
+  body.is-lockin-focus-window .lockin-start-quiet small,
+  body.is-lockin-focus-window .lockin-start-quiet .focus-os-guidance,
+  body.is-lockin-focus-window .lockin-note-hint,
+  body.is-sticky-note-window .sticky-note-window__sync {
+    display: none;
+  }
+
+  body.is-lockin-focus-window .lockin-focus-clock {
+    width: clamp(60px, 14dvh, 78px);
+  }
+
+  body.is-lockin-focus-window .lockin-focus-clock {
+    width: clamp(46px, 12dvh, 68px);
+  }
+
+  body.is-lockin-focus-window .lockin-panel__actions button {
+    min-height: 25px;
+    padding: 0.1rem 0.3rem;
+    font-size: 0.56rem;
+  }
+
+  body.is-lockin-focus-window .lockin-sticky-note {
+    grid-template-rows: auto minmax(32px, 1fr) auto auto;
+    gap: 2px;
+    padding: 4px;
+  }
+
+  body.is-lockin-focus-window .lockin-sticky-note textarea {
+    min-height: 32px;
+  }
+
+  body.is-lockin-focus-window .lockin-note-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+
+  body.is-lockin-focus-window .lockin-note-actions button {
+    min-height: 23px;
+    padding: 0.1rem 0.25rem;
+    font-size: 0.54rem;
   }
 }
