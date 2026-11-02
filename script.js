@@ -5632,22 +5632,32 @@ const views = {
     <section class="consent-screen" aria-labelledby="consent-title">
       <div class="consent-card card">
         <img src="logo.svg" alt="Questify" class="consent-logo" width="64" height="64">
-        <p class="dashboard-section__eyebrow">WELCOME TO QUESTIFY</p>
-        <h1 id="consent-title">A thoughtful start</h1>
-        <p class="text-muted">Before continuing, please review how Questify works and the terms for using this app. Your progress stays on this device.</p>
+        <p class="dashboard-section__eyebrow">GETTING STARTED</p>
+        <h1 id="consent-title">Review and accept</h1>
+        <p class="text-muted consent-intro">Questify keeps your progress in this browser on this device. Review both documents below; you must agree to each before continuing.</p>
         <div class="consent-document-links">
           <a class="consent-document-link" href="privacy.html" target="_blank" rel="noopener">
-            <span><strong>Privacy Policy</strong><small>Local data, notifications, and your choices</small></span><span aria-hidden="true">↗</span>
+            <span><strong>Read the Privacy Policy</strong><small>What data stays on this device and how reminders work · Opens in a new tab</small></span><span aria-hidden="true">↗</span>
           </a>
           <a class="consent-document-link" href="terms.html" target="_blank" rel="noopener">
-            <span><strong>Terms of Service</strong><small>What Questify does and what to expect</small></span><span aria-hidden="true">↗</span>
+            <span><strong>Read the Terms of Service</strong><small>How Questify works and the terms for using it · Opens in a new tab</small></span><span aria-hidden="true">↗</span>
           </a>
         </div>
-        <form id="consent-form">
-          <label class="consent-check"><input type="checkbox" name="privacy" required><span>I have read and agree to the <a href="privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.</span></label>
-          <label class="consent-check"><input type="checkbox" name="terms" required><span>I have read and agree to the <a href="terms.html" target="_blank" rel="noopener">Terms of Service</a>.</span></label>
-          <p class="error-text" id="consent-error" role="status"></p>
-          <button type="submit" class="btn">Agree and continue</button>
+        <form id="consent-form" novalidate>
+          <fieldset class="consent-agreements" aria-describedby="consent-instructions consent-error">
+            <legend>Agree to both documents</legend>
+            <p class="consent-instructions" id="consent-instructions">Select both options to continue.</p>
+            <label class="consent-check">
+              <input type="checkbox" name="privacy" required aria-describedby="consent-instructions consent-error" aria-invalid="false">
+              <span>I agree to the <a href="privacy.html" target="_blank" rel="noopener" aria-label="Privacy Policy, opens in a new tab">Privacy Policy</a>.</span>
+            </label>
+            <label class="consent-check">
+              <input type="checkbox" name="terms" required aria-describedby="consent-instructions consent-error" aria-invalid="false">
+              <span>I agree to the <a href="terms.html" target="_blank" rel="noopener" aria-label="Terms of Service, opens in a new tab">Terms of Service</a>.</span>
+            </label>
+          </fieldset>
+          <p class="consent-error" id="consent-error" role="alert" aria-live="assertive"></p>
+          <button type="submit" class="btn">Agree to both and continue</button>
         </form>
         <p class="consent-version">Document version ${LEGAL_POLICY_VERSION}</p>
       </div>
@@ -7725,12 +7735,36 @@ function attachLoginFormHandler() {
 function attachConsentHandler() {
   const form = document.getElementById("consent-form");
   if (!form) return;
+  const checkboxes = [...form.querySelectorAll('input[type="checkbox"]')];
+  const error = document.getElementById("consent-error");
+
+  checkboxes.forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      if (!error.textContent) return;
+      const missing = checkboxes.filter((item) => !item.checked);
+      checkboxes.forEach((item) => {
+        item.setAttribute("aria-invalid", String(!item.checked));
+        item.closest(".consent-check")?.classList.toggle("is-invalid", !item.checked);
+      });
+      error.textContent = missing.length
+        ? `Please agree to the ${missing.map((item) => item.name === "privacy" ? "Privacy Policy" : "Terms of Service").join(" and ")} to continue.`
+        : "";
+    });
+  });
+
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!form.querySelector('[name="privacy"]').checked || !form.querySelector('[name="terms"]').checked) {
-      document.getElementById("consent-error").textContent = "Please agree to both documents to continue.";
+    const missing = checkboxes.filter((checkbox) => !checkbox.checked);
+    checkboxes.forEach((checkbox) => {
+      checkbox.setAttribute("aria-invalid", String(!checkbox.checked));
+      checkbox.closest(".consent-check")?.classList.toggle("is-invalid", !checkbox.checked);
+    });
+    if (missing.length) {
+      error.textContent = `Please agree to the ${missing.map((checkbox) => checkbox.name === "privacy" ? "Privacy Policy" : "Terms of Service").join(" and ")} to continue.`;
+      missing[0].focus();
       return;
     }
+    error.textContent = "";
     acceptCurrentPolicies();
   });
 }
