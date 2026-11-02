@@ -376,6 +376,7 @@ let searchQuery = "";
 let statusFilter = "all"; // "all" | "active" | "completed" | "archived"
 let dueFilter = "all"; // "all" | "today" | "week" - which challenges show by scheduled date
 let isConfirmingReset = false;
+let isConfirmingLogout = false;
 let tourStep = 0; // current onboarding tour step
 let tourTargetView = "dashboard";
 let isTourActive = false;
@@ -390,12 +391,11 @@ let confirmingHabitDeleteId = null;
 let isSidebarCollapsed = false;
 let isMobileNavigationOpen = false;
 let lockInPictureInPictureWindow = null;
-let lockInPictureInPictureInterval = null;
+let pictureInPictureRequest = null;
 let lockInTimerPopupWindow = null;
-let sessionNotePictureInPictureWindow = null;
-let savedNotePictureInPictureWindow = null;
+let isSessionNotePinnedInPictureInPicture = false;
 let savedNotePictureInPictureNoteId = null;
-let sessionNotePopupWindow = null;
+let isLockInTimerPinnedInPictureInPicture = false;
 
 function getLockInSyncSignature() {
   const active = getActiveLockIn();
@@ -547,6 +547,7 @@ function logout() {
   state = getDefaultState();
   state.legalAcceptance = legalAcceptance;
   saveState();
+  isConfirmingLogout = false;
   navigateTo("login");
 }
 
@@ -607,6 +608,7 @@ function resetAllData() {
   saveState();
   applyTheme();
   isConfirmingReset = false;
+  isConfirmingLogout = false;
   renderView();
   showToast("All data has been reset.");
 }
@@ -3552,6 +3554,12 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
   const completedIds = new Set(completedHabits.map((habit) => habit.id));
   const activeHabits = eligibleHabits.filter((habit) => !habit.archived);
   const completedCount = activeHabits.filter((habit) => completedIds.has(habit.id)).length;
+  const reviewHabits = isDashboardReview
+    ? activeHabits.filter((habit) => !completedIds.has(habit.id)).slice(0, 3)
+    : eligibleHabits;
+  const moreIncompleteHabits = isDashboardReview
+    ? Math.max(0, activeHabits.filter((habit) => !completedIds.has(habit.id)).length - reviewHabits.length)
+    : 0;
   const completionPercent = activeHabits.length ? Math.round((completedCount / activeHabits.length) * 100) : 0;
   const challenges = getDayDetail(dateStr);
   const challengeXp = challenges.completed.reduce((total, challenge) => total + challenge.xpValue, 0);
@@ -3602,8 +3610,8 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
         <small>7-day rhythm</small>
       </div>
       <div class="calendar-day-details__habits">
-        <h4>Habits</h4>
-        ${eligibleHabits.length ? eligibleHabits.map((habit) => `
+        <h4>${isDashboardReview ? "Next up" : "Habits"}</h4>
+        ${reviewHabits.length ? reviewHabits.map((habit) => `
           <div class="calendar-day-habit ${completedIds.has(habit.id) ? "is-complete" : ""}">
             ${!habit.archived && canCheckIn ? renderHabitCheckButton(habit, dateStr) : `<span class="calendar-day-habit__mark">${completedIds.has(habit.id) ? "✓" : "·"}</span>`}
             <span class="calendar-day-habit__info">
@@ -3616,7 +3624,8 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
               ? `+${(state.habitXpLedger || []).find((entry) => entry.habitId === habit.id && entry.date === dateStr)?.amount || 0} XP`
               : `+${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP`}</strong>
           </div>
-        `).join("") : `<p class="text-muted">No habits were set up by this date.</p>`}
+        `).join("") : `<p class="text-muted">${isDashboardReview && activeHabits.length ? "All habits checked in for today." : "No habits were set up by this date."}</p>`}
+        ${moreIncompleteHabits ? `<p class="text-muted calendar-day-details__more-habits">${moreIncompleteHabits} more to do · Open Habits to see the full list.</p>` : ""}
       </div>
       ${challenges.completed.length ? `
         <div class="calendar-day-details__challenges">
@@ -3842,6 +3851,12 @@ function renderTodayHabitsCard() {
   const { completed, active } = getDayDetail(todayStr);
   const habits = getActiveHabits();
   const completedHabits = getHabitCompletionsForDate(todayStr);
+  const nextHabits = habits.filter((habit) =>
+    !Array.isArray(habit.completedDates) || !habit.completedDates.includes(todayStr)
+  ).slice(0, 3);
+  const remainingHabits = Math.max(0, habits.filter((habit) =>
+    !Array.isArray(habit.completedDates) || !habit.completedDates.includes(todayStr)
+  ).length - nextHabits.length);
   const totalXp = completed.reduce((sum, c) => sum + c.xpValue, 0) + getHabitXpForDate(todayStr);
   const goalProgress = getDailyGoalProgress();
 
@@ -3896,8 +3911,11 @@ function renderTodayHabitsCard() {
       </div>
       ${habits.length ? `
         <div class="habit-daily-list">
-          ${habits.map((habit) => renderHabitDailyRow(habit, todayStr)).join("")}
+          ${nextHabits.length
+            ? nextHabits.map((habit) => renderHabitDailyRow(habit, todayStr)).join("")
+            : `<p class="text-muted habit-empty-note">You're all caught up for today.</p>`}
         </div>
+        ${remainingHabits ? `<p class="text-muted calendar-day-details__more-habits">${remainingHabits} more to do · Manage habits to see the full list.</p>` : ""}
       ` : `
         <p class="text-muted habit-empty-note">No daily habits yet. Add a few small rituals to start tracking your consistency.</p>
       `}
@@ -4028,6 +4046,7 @@ function renderHabitTracker() {
   const progress = possibleCheckIns ? Math.round((checkedThisWeek / possibleCheckIns) * 100) : 0;
   const firstDay = days[0];
   const lastDay = days[6];
+  const todayStr = getTodayDateString();
   const analytics = getHabitAnalytics(habitAnalyticsPeriod);
   const difficultyOptions = (selected) => Object.entries(CONFIG.HABIT_XP_REWARDS)
     .map(([difficulty, reward]) => `<option value="${difficulty}" ${selected === difficulty ? "selected" : ""}>${difficulty[0].toUpperCase()}${difficulty.slice(1)} · ${reward} XP</option>`)
@@ -4035,42 +4054,71 @@ function renderHabitTracker() {
   const categoryOptions = (selected = "general") => HABIT_CATEGORY_IDS
     .map((categoryId) => `<option value="${categoryId}" ${getHabitCategoryId(selected) === categoryId ? "selected" : ""}>${getCategoryConfig(categoryId).icon} ${getCategoryConfig(categoryId).label}</option>`)
     .join("");
-  const renderHabitManagerRow = (habit) => {
+  const renderHabitManagerRow = (habit, isArchived = false) => {
     const stats = getHabitCompletionRate([habit], habit.createdDate || (habit.createdAt || "").slice(0, 10), getTodayDateString());
     const streak = getHabitStreakStats(habit);
     const isEditing = editingHabitId === habit.id;
+    const isCompleteToday = Array.isArray(habit.completedDates) && habit.completedDates.includes(todayStr);
+    const difficulty = habit.difficulty || "medium";
     return `
-      <article class="habit-manager-row ${habit.archived ? "is-archived" : ""}" data-habit-card="${escapeHTML(habit.id)}">
-        <div class="habit-manager-row__details">
-          <div class="habit-manager-row__heading">
-            <span class="habit-manager-row__icon" aria-hidden="true">✦</span>
-            <strong class="habit-manager-row__title">${escapeHTML(habit.title)}</strong>
-            ${renderHabitCategoryTag(habit.category)}
-            <span class="difficulty-tag difficulty-${habit.difficulty || "medium"}">${(habit.difficulty || "medium")[0].toUpperCase()}${(habit.difficulty || "medium").slice(1)}</span>
-          </div>
-          ${habit.description ? `<p class="habit-manager-row__description text-muted">${escapeHTML(habit.description)}</p>` : ""}
-          <div class="habit-manager-row__meta">${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP per first check-in · ${stats.completed} successful check-ins · ${stats.percent}% overall · ${streak.current} day streak · ${streak.longest} best</div>
-        </div>
-        <div class="habit-manager-row__actions">
+      <tr class="habit-manager-table__row ${isArchived ? "is-archived" : ""}" data-habit-card="${escapeHTML(habit.id)}">
+        <td class="habit-manager-table__check" data-label="Today">
+          <input type="checkbox" class="habit-manager-table__checkbox" data-habit-toggle data-habit-id="${escapeHTML(habit.id)}" data-habit-date="${todayStr}" aria-label="${isCompleteToday ? "Uncheck" : "Check off"} ${escapeHTML(habit.title)} for today" ${isCompleteToday ? "checked" : ""} ${isArchived ? "disabled" : ""}>
+        </td>
+        <td class="habit-manager-table__identity" data-label="Habit">
+          <strong>${escapeHTML(habit.title)}</strong>
+          ${habit.description ? `<small>${escapeHTML(habit.description)}</small>` : ""}
+        </td>
+        <td class="habit-manager-table__category" data-label="Category">${renderHabitCategoryTag(habit.category)}</td>
+        <td class="habit-manager-table__difficulty" data-label="Difficulty">
+          <span class="difficulty-tag difficulty-${escapeHTML(difficulty)}">${escapeHTML(getDifficultyConfig(difficulty).label)}</span>
+          <small>+${CONFIG.HABIT_XP_REWARDS[difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP</small>
+        </td>
+        <td class="habit-manager-table__progress" data-label="Progress">
+          <strong>${streak.current} day streak</strong>
+          <small>${stats.completed} check-ins · ${stats.percent}% · ${streak.longest} best</small>
+        </td>
+        <td class="habit-manager-table__actions" data-label="Actions">
           <button type="button" class="btn-secondary btn-sm" data-habit-edit="${escapeHTML(habit.id)}">${isEditing ? "Close" : "Edit"}</button>
-          ${habit.archived
+          ${isArchived
             ? `<button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Restore ${escapeHTML(habit.title)}">Restore</button>`
             : `<button type="button" class="btn-secondary btn-sm" data-habit-archive="${escapeHTML(habit.id)}" aria-label="Archive ${escapeHTML(habit.title)}">Archive</button>`}
           <button type="button" class="btn-danger btn-sm" data-habit-delete="${escapeHTML(habit.id)}">Delete</button>
-        </div>
-        ${isEditing ? `
-          <form class="habit-edit-form" data-habit-edit-form="${escapeHTML(habit.id)}">
-            <label>Habit name<input name="title" value="${escapeHTML(habit.title)}" maxlength="50" required></label>
-            <label>Description<input name="description" value="${escapeHTML(habit.description || "")}" maxlength="180" placeholder="What does this habit mean to you?"></label>
-            <label>Difficulty<select name="difficulty">${difficultyOptions(habit.difficulty || "medium")}</select></label>
-            <label>Category<select name="category">${categoryOptions(habit.category)}</select></label>
-            <p class="error-text" data-habit-edit-error></p>
-            <button type="submit" class="btn btn-sm">Save changes</button>
-          </form>
-        ` : ""}
-      </article>
+        </td>
+      </tr>
+      ${isEditing ? `
+        <tr class="habit-manager-table__edit-row">
+          <td colspan="6">
+            <form class="habit-edit-form" data-habit-edit-form="${escapeHTML(habit.id)}">
+              <label>Habit name<input name="title" value="${escapeHTML(habit.title)}" maxlength="50" required></label>
+              <label>Description<input name="description" value="${escapeHTML(habit.description || "")}" maxlength="180" placeholder="What does this habit mean to you?"></label>
+              <label>Difficulty<select name="difficulty">${difficultyOptions(difficulty)}</select></label>
+              <label>Category<select name="category">${categoryOptions(habit.category)}</select></label>
+              <p class="error-text" data-habit-edit-error></p>
+              <button type="submit" class="btn btn-sm">Save changes</button>
+            </form>
+          </td>
+        </tr>
+      ` : ""}
     `;
   };
+  const renderHabitManagerTable = (items, isArchived = false) => `
+    <div class="habit-manager-table-scroll">
+      <table class="habit-manager-table" aria-label="${isArchived ? "Archived habits" : "Active daily habits"}">
+        <thead>
+          <tr>
+            <th scope="col">Today</th>
+            <th scope="col">Habit</th>
+            <th scope="col">Category</th>
+            <th scope="col">Difficulty</th>
+            <th scope="col">Progress</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>${items.map((habit) => renderHabitManagerRow(habit, isArchived)).join("")}</tbody>
+      </table>
+    </div>
+  `;
   const analyticsTitle = { day: "Daily performance", week: "Weekly performance", month: "Monthly performance" }[habitAnalyticsPeriod];
 
   return `
@@ -4150,7 +4198,7 @@ function renderHabitTracker() {
       <div class="habit-card-heading">
         <div>
           <h3 id="habit-manager-title">Your daily habits</h3>
-          <p class="text-muted">Edit names, descriptions, difficulty, and category without losing check-in history. A check-in earns XP once per habit per date.</p>
+          <p class="text-muted">Check in, scan each habit's category and progress, or edit its details. A check-in earns XP once per habit per date.</p>
         </div>
       </div>
       <form id="add-habit-form" class="add-habit-form" novalidate>
@@ -4166,13 +4214,13 @@ function renderHabitTracker() {
       </form>
       <p class="error-text" id="add-habit-error" role="status"></p>
       <div class="habit-manager-list">
-        ${habits.length ? habits.map(renderHabitManagerRow).join("") : `<p class="habit-empty-note text-muted">Your list is empty. Add your first small daily habit above.</p>`}
+        ${habits.length ? renderHabitManagerTable(habits) : `<p class="habit-empty-note text-muted">Your list is empty. Add your first small daily habit above.</p>`}
       </div>
       ${archivedHabits.length ? `
         <details class="habit-archived">
           <summary>Archived habits (${archivedHabits.length})</summary>
           <div class="habit-manager-list">
-            ${archivedHabits.map(renderHabitManagerRow).join("")}
+            ${renderHabitManagerTable(archivedHabits, true)}
           </div>
         </details>
       ` : ""}
@@ -4328,12 +4376,12 @@ function renderLockInStickyNote() {
       </div>
       <div class="lockin-note-actions">
         ${!isSessionNoteWindow
-          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">Open note window ↗</button>`
+          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note above windows"}</button>`
           : ""}
         <button type="button" class="btn-secondary btn-sm" id="lockin-save-note-btn">${savedNote ? "Update Sticky Notes" : "Save to Sticky Notes"}</button>
       </div>
       ${!isSessionNoteWindow
-        ? `<p class="lockin-note-hint text-muted">Open the note in its own window to pin it independently of the timer.</p>`
+        ? `<p class="lockin-note-hint text-muted">Pin the timer and note independently in the shared floating window.</p>`
         : ""}
     </section>
   `;
@@ -4405,45 +4453,199 @@ function supportsDocumentPictureInPicture() {
     typeof window.documentPictureInPicture?.requestWindow === "function";
 }
 
+function isMobileDevice() {
+  return navigator.userAgentData?.mobile === true ||
+    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function showPictureInPictureDeviceMessage() {
+  showToast("Floating pin windows aren't available on phones. Open Questify on a PC to pin the timer or note above other windows.");
+}
+
 function isSessionNotePictureInPictureOpen() {
-  return Boolean(sessionNotePictureInPictureWindow && !sessionNotePictureInPictureWindow.closed);
+  return Boolean(lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed && isSessionNotePinnedInPictureInPicture);
 }
 
 function updateSessionNotePictureInPictureButton() {
   const button = document.getElementById("lockin-session-note-pip-btn");
   if (button) {
-    button.textContent = isSessionNoteWindow
-      ? isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note"
-      : "Open note window ↗";
+    button.textContent = isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note above windows";
   }
 }
 
-function preparePictureInPictureWindow(pipWindow, bodyClass, content) {
-  pipWindow.document.title = bodyClass === "lockin-pip-host" ? "Timer" : "Note";
+function preparePictureInPictureWindow(pipWindow) {
+  pipWindow.document.title = "Questify — Floating tools";
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
-  const stylesheet = pipWindow.document.createElement("link");
-  stylesheet.rel = "stylesheet";
-  stylesheet.href = new URL("style.css", window.location.href).href;
-  pipWindow.document.head.append(stylesheet);
-  pipWindow.document.body.classList.add(bodyClass);
+  const styles = [...document.styleSheets].map((stylesheet) => {
+    if (stylesheet.href && new URL(stylesheet.href, window.location.href).origin !== window.location.origin) {
+      return "";
+    }
+    try {
+      return [...stylesheet.cssRules].map((rule) => rule.cssText).join("\n");
+    } catch (error) {
+      console.warn("A stylesheet could not be copied into the floating window:", stylesheet.href || "inline stylesheet", error);
+      return "";
+    }
+  }).filter(Boolean).join("\n");
+  const fallbackStyles = `
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0}
+    body{font:14px system-ui,sans-serif;color:#f5f7fb;background:#111827}
+    button,input,textarea{font:inherit}button{cursor:pointer}
+    .questify-pip-layout{display:grid;gap:8px;max-height:100dvh;overflow:auto;padding:8px}
+    .lockin-pip,.note-pip{min-height:0;padding:8px;border-radius:12px}
+    .lockin-pip{display:grid;gap:8px;background:#1f2937}
+    .lockin-pip__header,.note-pip>header,.lockin-pip__actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .lockin-pip__timer{font-size:1.5rem;font-variant-numeric:tabular-nums;font-weight:800}
+    .lockin-pip__track{height:4px;background:#ffffff30}.lockin-pip__track span{display:block;height:100%;background:#7c6cff}
+    .note-pip{display:grid;gap:8px;color:#302817;background:#fff1a8}
+    .note-pip textarea{width:100%;min-height:72px;resize:vertical}
+    .sticky-note-card__colors{display:flex;gap:8px}
+    .lockin-note-swatch{width:22px;height:22px;border:0;border-radius:50%;background:var(--swatch-color)}
+  `;
+  const style = pipWindow.document.createElement("style");
+  style.textContent = styles || fallbackStyles;
+  pipWindow.document.head.append(style);
+  pipWindow.document.body.classList.add("lockin-pip-host", "questify-pip-host");
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
-  pipWindow.document.body.innerHTML = content;
+  pipWindow.document.body.innerHTML = "";
+}
+
+function renderPictureInPictureContent() {
+  const pipWindow = lockInPictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed) return;
+  const active = getActiveLockIn();
+  const pinnedNote = isSessionNotePinnedInPictureInPicture
+    ? { kind: "session", id: active?.id }
+    : savedNotePictureInPictureNoteId
+      ? { kind: "saved", id: savedNotePictureInPictureNoteId }
+      : null;
+  const note = pinnedNote?.kind === "saved"
+    ? state.notes.find((item) => item.id === pinnedNote.id)
+    : null;
+  const hasTimer = isLockInTimerPinnedInPictureInPicture && active;
+  if (pinnedNote?.kind === "saved" && !note) {
+    savedNotePictureInPictureNoteId = null;
+    pinnedNote.kind = null;
+  }
+  const timerMarkup = hasTimer ? `
+    <section class="lockin-pip" aria-label="Lock In timer">
+      <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(active.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="timer">Unpin timer</button></header>
+      <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
+      <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
+      <div class="lockin-pip__actions"><button type="button" class="btn-secondary btn-sm" data-pip-pause>${active.isPaused ? "Resume" : "Pause"}</button><button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button></div>
+    </section>
+  ` : "";
+  let noteMarkup = "";
+  if (isSessionNotePinnedInPictureInPicture && active) {
+    const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
+    noteMarkup = `
+      <section class="note-pip session-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-label="Lock In note">
+        <header><strong>Session note</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="note">Unpin note</button></header>
+        <label class="sr-only" for="session-note-pip-content">Focus note</label>
+        <textarea id="session-note-pip-content" maxlength="500" placeholder="Add a thought…">${escapeHTML(active.sessionNote || "")}</textarea>
+        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+        </div>
+      </section>
+    `;
+  } else if (note) {
+    const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+    noteMarkup = `
+      <section class="note-pip saved-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-label="Sticky note">
+        <header><input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title"><button type="button" class="btn-secondary btn-sm" data-pip-unpin="note">Unpin note</button></header>
+        <label class="sr-only" for="saved-note-pip-content">Note content</label>
+        <textarea id="saved-note-pip-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
+          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+          `).join("")}
+        </div>
+      </section>
+    `;
+  }
+  pipWindow.document.body.classList.toggle("has-pinned-timer", Boolean(hasTimer));
+  pipWindow.document.body.classList.toggle("has-pinned-note", Boolean(noteMarkup));
+  pipWindow.document.body.innerHTML = `<main class="questify-pip-layout">${timerMarkup}${noteMarkup}</main>`;
+  attachPictureInPictureHandlers(pipWindow, pinnedNote);
+  if (hasTimer) updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
+  pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
+}
+
+function attachPictureInPictureHandlers(pipWindow, pinnedNote) {
+  pipWindow.document.querySelectorAll("[data-pip-unpin]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.pipUnpin === "timer") closeLockInPictureInPicture();
+      else if (pinnedNote?.kind === "session") closeSessionNotePictureInPicture();
+      else closeSavedNotePictureInPicture();
+    });
+  });
+  pipWindow.document.querySelector("[data-pip-pause]")?.addEventListener("click", () => {
+    const current = getActiveLockIn();
+    if (!current) return;
+    current.isPaused ? resumeLockIn(current.id) : pauseLockIn(current.id);
+    renderView();
+  });
+  pipWindow.document.querySelector("[data-pip-add-time]")?.addEventListener("click", () => {
+    const current = getActiveLockIn();
+    if (!current) return;
+    addLockInTime(current.id, 10);
+    updateLockInTimerDisplay();
+  });
+  const sessionNoteInput = pipWindow.document.getElementById("session-note-pip-content");
+  sessionNoteInput?.addEventListener("input", () => {
+    const current = getActiveLockIn();
+    if (!current) return;
+    current.sessionNote = sessionNoteInput.value.slice(0, 500);
+    saveState();
+    syncSessionNoteInput();
+  });
+  const savedNoteTitle = pipWindow.document.getElementById("saved-note-pip-title");
+  const savedNoteContent = pipWindow.document.getElementById("saved-note-pip-content");
+  if (savedNoteTitle || savedNoteContent) {
+    const noteId = savedNotePictureInPictureNoteId;
+    const updateNote = () => {
+      const current = state.notes.find((item) => item.id === noteId);
+      if (!current) {
+        closeSavedNotePictureInPicture();
+        return;
+      }
+      current.title = (savedNoteTitle?.value || "").slice(0, 80);
+      current.content = (savedNoteContent?.value || "").slice(0, 2000);
+      current.updatedAt = new Date().toISOString();
+      saveState();
+      syncStickyNotePopupEditor(current);
+    };
+    savedNoteTitle?.addEventListener("input", updateNote);
+    savedNoteContent?.addEventListener("input", updateNote);
+  }
+  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (pinnedNote?.kind === "session") updateLockInNoteColor(button.dataset.pipNoteColor);
+      else if (pinnedNote?.kind === "saved") updateStickyNoteColor(pinnedNote.id, button.dataset.pipNoteColor);
+    });
+  });
 }
 
 function closeSessionNotePictureInPicture() {
-  const pipWindow = sessionNotePictureInPictureWindow;
-  sessionNotePictureInPictureWindow = null;
-  if (pipWindow && !pipWindow.closed) pipWindow.close();
+  if (!isSessionNotePinnedInPictureInPicture) return;
+  isSessionNotePinnedInPictureInPicture = false;
   const noteWidget = getFloatingWidget("note");
   if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
     setFloatingWidget("note", null);
   }
+  closePictureInPictureIfEmpty();
+  renderPictureInPictureContent();
   updateSessionNotePictureInPictureButton();
+  updateSavedNotePictureInPictureButton();
 }
 
 function syncSessionNotePictureInPicture() {
-  const pipWindow = sessionNotePictureInPictureWindow;
+  const pipWindow = lockInPictureInPictureWindow;
   if (!pipWindow || pipWindow.closed) return;
+  if (!isSessionNotePinnedInPictureInPicture) return;
   const active = getActiveLockIn();
   if (!active) {
     closeSessionNotePictureInPicture();
@@ -4468,84 +4670,30 @@ function syncSessionNotePictureInPicture() {
 async function toggleSessionNotePictureInPicture() {
   const active = getActiveLockIn();
   if (!active) return;
-  if (!isSessionNoteWindow) {
-    if (sessionNotePopupWindow && !sessionNotePopupWindow.closed) {
-      sessionNotePopupWindow.focus();
-      return;
-    }
-    const noteUrl = new URL(window.location.href);
-    ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
-    noteUrl.searchParams.set("session-note", active.id);
-    noteUrl.hash = "";
-    sessionNotePopupWindow = window.open(
-      noteUrl.toString(),
-      `questify-lockin-note-${active.id}`,
-      "popup=yes,width=420,height=520,resizable=yes,scrollbars=no"
-    );
-    if (!sessionNotePopupWindow) {
-      showToast("The Lock In note stayed on this page because the browser blocked its separate window. Allow pop-ups to open it.");
-      return;
-    }
-    sessionNotePopupWindow.focus();
-    return;
-  }
   if (isSessionNotePictureInPictureOpen()) {
     closeSessionNotePictureInPicture();
     return;
   }
-  if (!supportsDocumentPictureInPicture()) {
-    showToast("This browser can't pin notes above other windows. The note remains editable in its separate window.");
+  if (isMobileDevice()) {
+    showPictureInPictureDeviceMessage();
     return;
   }
-  const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
+  if (!supportsDocumentPictureInPicture()) {
+    showToast("This browser can't keep notes above other windows. Your note remains editable in Lock In.");
+    return;
+  }
   try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 300, height: 190 });
-    sessionNotePictureInPictureWindow = pipWindow;
-    preparePictureInPictureWindow(
-      pipWindow,
-      "note-pip-host",
-      `<main class="note-pip session-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
-        <header><span>Note</span><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
-        <label class="sr-only" for="session-note-pip-content">Focus note</label>
-        <textarea id="session-note-pip-content" maxlength="500" placeholder="Add a thought…">${escapeHTML(active.sessionNote || "")}</textarea>
-        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
-          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
-            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
-          `).join("")}
-        </div>
-      </main>`
-    );
-    const input = pipWindow.document.getElementById("session-note-pip-content");
-    input?.addEventListener("input", () => {
-      const current = getActiveLockIn();
-      if (!current) return;
-      current.sessionNote = input.value.slice(0, 500);
-      saveState();
-      syncSessionNoteInput();
-    });
-    pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
-      button.addEventListener("click", () => updateLockInNoteColor(button.dataset.pipNoteColor));
-    });
-    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
-      closeSessionNotePictureInPicture();
-      returnToQuestifyFromPopup();
-    });
-    pipWindow.addEventListener("pagehide", () => {
-      if (sessionNotePictureInPictureWindow === pipWindow) {
-        sessionNotePictureInPictureWindow = null;
-        const noteWidget = getFloatingWidget("note");
-        if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
-          setFloatingWidget("note", null);
-        }
-        updateSessionNotePictureInPictureButton();
-      }
-    }, { once: true });
+    await ensurePictureInPictureWindow();
+    isSessionNotePinnedInPictureInPicture = true;
+    savedNotePictureInPictureNoteId = null;
     setFloatingWidget("note", { mode: "pip", kind: "session", id: active.id });
+    renderPictureInPictureContent();
     syncSessionNotePictureInPicture();
     updateSessionNotePictureInPictureButton();
+    updateSavedNotePictureInPictureButton();
   } catch (error) {
     console.error("Could not pin the Lock In note:", error);
-    showToast("The browser couldn't pin this note. It remains saved in its separate editor window.");
+    showToast("The browser couldn't open the floating note. It remains editable in Lock In.");
   }
 }
 
@@ -4600,7 +4748,7 @@ function renderLockInFocusWindow() {
         <div class="lockin-focus-window__brand">
           <div><p class="dashboard-section__eyebrow">FOCUS SPACE</p><h1 id="lockin-focus-window-title">${escapeHTML(active?.title || "Questify Lock In")}</h1></div>
         </div>
-        ${active ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary btn-sm" aria-label="Pin timer above other windows">${lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed ? "Unpin timer" : "Pin timer"}</button>` : ""}
+        ${active ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary btn-sm" aria-label="Pin timer above other windows">${isLockInTimerPinnedInPictureInPicture ? "Unpin timer" : "Pin timer"}</button>` : ""}
         <button type="button" id="lockin-focus-window-close" class="btn-secondary btn-sm">Close</button>
       </header>
       ${renderLockInPanel()}
@@ -4611,7 +4759,7 @@ function renderLockInFocusWindow() {
 function updateLockInPictureInPictureButton() {
   const button = document.getElementById("lockin-picture-in-picture-btn");
   if (button) {
-    button.textContent = lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed
+    button.textContent = isLockInTimerPinnedInPictureInPicture
       ? "Unpin timer"
       : lockInTimerPopupWindow && !lockInTimerPopupWindow.closed
       ? "Close timer window"
@@ -4620,14 +4768,13 @@ function updateLockInPictureInPictureButton() {
 }
 
 function updateLockInPictureInPicture(active, elapsedSec) {
-  if (!lockInPictureInPictureWindow || lockInPictureInPictureWindow.closed) return;
-  lockInPictureInPictureWindow.document.body.classList.toggle(
-    "is-floating-transparent",
-    state.preferences.floatingWindowsTransparent
-  );
-  const title = lockInPictureInPictureWindow.document.getElementById("lockin-pip-title");
-  const timer = lockInPictureInPictureWindow.document.getElementById("lockin-pip-timer");
-  const progress = lockInPictureInPictureWindow.document.getElementById("lockin-pip-progress");
+  const pipWindow = lockInPictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed || !isLockInTimerPinnedInPictureInPicture) return;
+  pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
+  pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
+  const title = pipWindow.document.getElementById("lockin-pip-title");
+  const timer = pipWindow.document.getElementById("lockin-pip-timer");
+  const progress = pipWindow.document.getElementById("lockin-pip-progress");
   if (title) title.textContent = active.title;
   if (timer) {
     const remaining = Math.max(0, active.targetMinutes * 60 - elapsedSec);
@@ -4638,22 +4785,59 @@ function updateLockInPictureInPicture(active, elapsedSec) {
       : `+${formatLockInClock(elapsedSec - active.targetMinutes * 60)}`;
   }
   if (progress) progress.style.width = `${Math.min(100, (elapsedSec / (active.targetMinutes * 60)) * 100)}%`;
-  const pauseButton = lockInPictureInPictureWindow.document.querySelector("[data-pip-pause]");
+  const pauseButton = pipWindow.document.querySelector("[data-pip-pause]");
   if (pauseButton) pauseButton.textContent = active.isPaused ? "Resume" : "Pause";
 }
 
-function closeLockInPictureInPicture() {
-  if (lockInPictureInPictureInterval) clearInterval(lockInPictureInPictureInterval);
-  lockInPictureInPictureInterval = null;
+async function ensurePictureInPictureWindow() {
+  if (lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed) return lockInPictureInPictureWindow;
+  if (pictureInPictureRequest) return pictureInPictureRequest;
+  pictureInPictureRequest = (async () => {
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 360, height: 360 });
+    lockInPictureInPictureWindow = pipWindow;
+    preparePictureInPictureWindow(pipWindow);
+    pipWindow.addEventListener("pagehide", () => {
+      if (lockInPictureInPictureWindow !== pipWindow) return;
+      lockInPictureInPictureWindow = null;
+      isLockInTimerPinnedInPictureInPicture = false;
+      isSessionNotePinnedInPictureInPicture = false;
+      savedNotePictureInPictureNoteId = null;
+      if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
+      const noteWidget = getFloatingWidget("note");
+      if (noteWidget?.mode === "pip" && noteWidget.ownerId === appWindowId) setFloatingWidget("note", null);
+      updateLockInPictureInPictureButton();
+      updateSessionNotePictureInPictureButton();
+      updateSavedNotePictureInPictureButton();
+    }, { once: true });
+    return pipWindow;
+  })();
+  try {
+    return await pictureInPictureRequest;
+  } finally {
+    pictureInPictureRequest = null;
+  }
+}
+
+function closePictureInPictureIfEmpty() {
+  if (isLockInTimerPinnedInPictureInPicture ||
+      isSessionNotePinnedInPictureInPicture ||
+      savedNotePictureInPictureNoteId) return;
   const pipWindow = lockInPictureInPictureWindow;
   lockInPictureInPictureWindow = null;
   if (pipWindow && !pipWindow.closed) pipWindow.close();
+  updateLockInPictureInPictureButton();
+}
+
+function closeLockInPictureInPicture() {
+  isLockInTimerPinnedInPictureInPicture = false;
   if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
+  closePictureInPictureIfEmpty();
+  renderPictureInPictureContent();
   updateLockInPictureInPictureButton();
 }
 
 async function openLockInPictureInPicture() {
-  if (lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed) {
+  if (isLockInTimerPinnedInPictureInPicture) {
     closeLockInPictureInPicture();
     return;
   }
@@ -4668,6 +4852,10 @@ async function openLockInPictureInPicture() {
     showToast("Start a Lock In session before pinning its timer.");
     return;
   }
+  if (isMobileDevice()) {
+    showPictureInPictureDeviceMessage();
+    return;
+  }
   if (!supportsDocumentPictureInPicture()) {
     if (isLockInTimerWindow) {
       showToast("Picture-in-Picture isn't available. Keep using this timer window; it may not stay on top.");
@@ -4680,42 +4868,10 @@ async function openLockInPictureInPicture() {
     return;
   }
   try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 310, height: 150 });
-    lockInPictureInPictureWindow = pipWindow;
-    preparePictureInPictureWindow(
-      pipWindow,
-      "lockin-pip-host",
-      `<main class="lockin-pip">
-        <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(active.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
-        <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
-        <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
-        <div class="lockin-pip__actions"><button type="button" class="btn-secondary btn-sm" data-pip-pause>${active.isPaused ? "Resume" : "Pause"}</button><button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button></div>
-      </main>`
-    );
-    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
-      closeLockInPictureInPicture();
-      returnToQuestifyFromPopup();
-    });
-    pipWindow.document.querySelector("[data-pip-pause]")?.addEventListener("click", () => {
-      const current = getActiveLockIn();
-      if (!current) return;
-      current.isPaused ? resumeLockIn(current.id) : pauseLockIn(current.id);
-      renderView();
-    });
-    pipWindow.document.querySelector("[data-pip-add-time]")?.addEventListener("click", () => {
-      const current = getActiveLockIn();
-      if (!current) return;
-      addLockInTime(current.id, 10);
-      updateLockInTimerDisplay();
-    });
-    pipWindow.addEventListener("pagehide", () => {
-      if (lockInPictureInPictureWindow === pipWindow) {
-        lockInPictureInPictureWindow = null;
-        if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
-      }
-      updateLockInPictureInPictureButton();
-    }, { once: true });
+    await ensurePictureInPictureWindow();
+    isLockInTimerPinnedInPictureInPicture = true;
     setFloatingWidget("timer", { mode: "pip", kind: "lockin", id: active.id });
+    renderPictureInPictureContent();
     updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
     updateLockInPictureInPictureButton();
   } catch (error) {
@@ -4767,6 +4923,9 @@ function renderLockInPanel() {
             <span id="lockin-status" class="lockin-status">Locked in...</span>
             ${!isLockInFocusWindow && !isLockInTimerWindow
               ? `<button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>`
+              : ""}
+            ${!isLockInFocusWindow && !isLockInTimerWindow
+              ? `<button type="button" class="btn-secondary btn-sm" id="lockin-picture-in-picture-btn" aria-label="Pin timer above other windows">${isLockInTimerPinnedInPictureInPicture ? "Unpin timer" : "Pin timer"}</button>`
               : ""}
           </div>
         </div>
@@ -5185,7 +5344,7 @@ function renderStickyNotesPage() {
         <div>
           <p class="dashboard-section__eyebrow">YOUR THOUGHTS, IN ONE PLACE</p>
           <h1 id="sticky-notes-title">Sticky Notes</h1>
-          <p class="text-muted">Capture ideas, then open a note in its own window to float it above other apps where your browser supports it.</p>
+          <p class="text-muted">Capture ideas and pin a note above other windows where your browser supports it.</p>
         </div>
         <button type="button" class="btn" id="create-sticky-note">＋ New note</button>
       </header>
@@ -5242,31 +5401,8 @@ function renderStickyNotePopup() {
   `;
 }
 
-function openStickyNoteWindow(noteId) {
-  const note = state.notes.find((item) => item.id === noteId);
-  if (!note) {
-    showToast("This sticky note could not be found.");
-    return;
-  }
-  const noteUrl = new URL(window.location.href);
-  ["focus", "note", "timer", "session-note"].forEach((key) => noteUrl.searchParams.delete(key));
-  noteUrl.searchParams.set("note", noteId);
-  noteUrl.hash = "";
-  const noteWindow = window.open(
-    noteUrl.toString(),
-    `questify-sticky-note-${noteId}`,
-    "popup=yes,width=440,height=560,resizable=yes,scrollbars=no"
-  );
-  if (!noteWindow) {
-    showToast("The sticky note stayed on this page because the browser blocked its separate window. Allow pop-ups to open it.");
-    return false;
-  }
-  noteWindow.focus();
-  return true;
-}
-
 function isSavedNotePictureInPictureOpen() {
-  return Boolean(savedNotePictureInPictureWindow && !savedNotePictureInPictureWindow.closed);
+  return Boolean(lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed && savedNotePictureInPictureNoteId);
 }
 
 function updateSavedNotePictureInPictureButton() {
@@ -5286,20 +5422,21 @@ function updateSavedNotePictureInPictureButton() {
 }
 
 function closeSavedNotePictureInPicture() {
-  const pipWindow = savedNotePictureInPictureWindow;
-  savedNotePictureInPictureWindow = null;
+  if (!savedNotePictureInPictureNoteId) return;
   savedNotePictureInPictureNoteId = null;
-  if (pipWindow && !pipWindow.closed) pipWindow.close();
   const noteWidget = getFloatingWidget("note");
   if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
     setFloatingWidget("note", null);
   }
+  closePictureInPictureIfEmpty();
+  renderPictureInPictureContent();
   updateSavedNotePictureInPictureButton();
+  updateSessionNotePictureInPictureButton();
 }
 
 function syncSavedNotePictureInPicture() {
-  const pipWindow = savedNotePictureInPictureWindow;
-  if (!pipWindow || pipWindow.closed) return;
+  const pipWindow = lockInPictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed || !savedNotePictureInPictureNoteId) return;
   const note = state.notes.find((item) => item.id === savedNotePictureInPictureNoteId);
   if (!note) {
     closeSavedNotePictureInPicture();
@@ -5311,8 +5448,6 @@ function syncSavedNotePictureInPicture() {
     card.style.setProperty("--lockin-note-color", color);
     card.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
   }
-  pipWindow.document.body.style.setProperty("--lockin-note-color", color);
-  pipWindow.document.body.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   const title = pipWindow.document.getElementById("saved-note-pip-title");
@@ -5348,86 +5483,36 @@ async function toggleSavedNotePictureInPicture(noteId = stickyNoteWindowId) {
     closeSavedNotePictureInPicture();
     return;
   }
-  if (isSavedNotePictureInPictureOpen()) closeSavedNotePictureInPicture();
   const note = state.notes.find((item) => item.id === noteId);
   if (!note) {
     showToast("This sticky note could not be found.");
     return;
   }
-  if (!supportsDocumentPictureInPicture()) {
-    if (isStickyNoteWindow) {
-      showToast("This browser can't pin notes above other windows. Your note remains editable here.");
-    } else if (openStickyNoteWindow(noteId)) {
-      showToast("Picture-in-Picture isn't available. Opened the note in a separate window; it may not stay on top.");
-    }
+  if (isMobileDevice()) {
+    showPictureInPictureDeviceMessage();
     return;
   }
-  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  if (!supportsDocumentPictureInPicture()) {
+    showToast("This browser can't keep notes above other windows. Your note remains editable in Sticky Notes.");
+    return;
+  }
   try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 310, height: 210 });
-    savedNotePictureInPictureWindow = pipWindow;
+    await ensurePictureInPictureWindow();
+    isSessionNotePinnedInPictureInPicture = false;
     savedNotePictureInPictureNoteId = note.id;
-    pipWindow.document.title = "Note";
-    preparePictureInPictureWindow(
-      pipWindow,
-      "note-pip-host",
-      `<main class="note-pip saved-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
-        <header><input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title"><button type="button" class="btn-secondary btn-sm" data-pip-unpin>Unpin</button></header>
-        <label class="sr-only" for="saved-note-pip-content">Note content</label>
-        <textarea id="saved-note-pip-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
-        <div class="sticky-note-card__colors" role="group" aria-label="Note color">
-          ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
-            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
-          `).join("")}
-        </div>
-      </main>`
-    );
-    const titleInput = pipWindow.document.getElementById("saved-note-pip-title");
-    const contentInput = pipWindow.document.getElementById("saved-note-pip-content");
-    const updateNote = () => {
-      const current = state.notes.find((item) => item.id === note.id);
-      if (!current) {
-        closeSavedNotePictureInPicture();
-        return;
-      }
-      current.title = (titleInput?.value || "").slice(0, 80);
-      current.content = (contentInput?.value || "").slice(0, 2000);
-      current.updatedAt = new Date().toISOString();
-      saveState();
-      syncStickyNotePopupEditor(current);
-      syncSavedNotePictureInPicture();
-    };
-    titleInput?.addEventListener("input", updateNote);
-    contentInput?.addEventListener("input", updateNote);
-    pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
-      button.addEventListener("click", () => updateStickyNoteColor(note.id, button.dataset.pipNoteColor));
-    });
-    pipWindow.document.querySelector("[data-pip-unpin]")?.addEventListener("click", () => {
-      closeSavedNotePictureInPicture();
-      returnToQuestifyFromPopup();
-    });
-    pipWindow.addEventListener("pagehide", () => {
-      if (savedNotePictureInPictureWindow === pipWindow) {
-        savedNotePictureInPictureWindow = null;
-        savedNotePictureInPictureNoteId = null;
-        const noteWidget = getFloatingWidget("note");
-        if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
-          setFloatingWidget("note", null);
-        }
-        updateSavedNotePictureInPictureButton();
-      }
-    }, { once: true });
+    const noteWidget = getFloatingWidget("note");
+    if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
+      setFloatingWidget("note", null);
+    }
     setFloatingWidget("note", { mode: "pip", kind: "saved", id: note.id });
+    renderPictureInPictureContent();
     updateSavedNotePictureInPictureButton();
+    updateSessionNotePictureInPictureButton();
   } catch (error) {
     console.error("Could not open the saved note Picture-in-Picture window:", error);
     const status = document.getElementById("saved-note-pip-status");
-    if (status) status.textContent = "The floating note could not open. The browser may limit simultaneous PiP windows.";
-    if (!isStickyNoteWindow && openStickyNoteWindow(noteId)) {
-      showToast("The floating note could not open. Opened a regular note window, which may not stay on top.");
-    } else {
-      showToast("The browser could not pin this note. It remains editable in its current window.");
-    }
+    if (status) status.textContent = "The floating note could not open. The note remains editable here.";
+    showToast("The browser could not pin this note. It remains editable in Sticky Notes.");
   }
 }
 
@@ -5497,7 +5582,6 @@ function renderStickyNoteCard(note) {
       <div class="sticky-note-card__actions">
         <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinned ? "Unpin in Questify" : "Pin in Questify"}</button>
         <button type="button" class="btn-secondary btn-sm" data-note-pip="${escapeAttribute(note.id)}">${isPinnedAboveWindows ? "Unpin above windows" : "Pin above windows"}</button>
-        <button type="button" class="btn-secondary btn-sm" data-note-open-window="${escapeAttribute(note.id)}">Open in window ↗</button>
         ${confirmingDelete
           ? `<span class="sticky-note-card__confirm">Delete this note?</span>
              <button type="button" class="btn-delete btn-sm" data-note-delete-confirm="${escapeAttribute(note.id)}">Delete</button>
@@ -5537,9 +5621,6 @@ function attachStickyNotesHandlers() {
   document.querySelectorAll("[data-note-custom-color]").forEach((input) => {
     input.addEventListener("input", () => updateStickyNoteColor(input.dataset.noteCustomColor, input.value));
   });
-  document.querySelectorAll("[data-note-open-window]").forEach((button) => {
-    button.addEventListener("click", () => openStickyNoteWindow(button.dataset.noteOpenWindow));
-  });
   document.querySelectorAll("[data-note-pip]").forEach((button) => {
     button.addEventListener("click", () => toggleSavedNotePictureInPicture(button.dataset.notePip));
   });
@@ -5552,6 +5633,8 @@ function attachStickyNotesHandlers() {
           pinnedNote.ownerId === appWindowId) {
         setFloatingWidget("note", null);
       } else {
+        if (isSessionNotePictureInPictureOpen()) closeSessionNotePictureInPicture();
+        if (isSavedNotePictureInPictureOpen()) closeSavedNotePictureInPicture();
         setFloatingWidget("note", { mode: "app", kind: "saved", id: button.dataset.notePinApp });
       }
       renderView();
@@ -5567,6 +5650,7 @@ function attachStickyNotesHandlers() {
     button.addEventListener("click", () => {
       const id = button.dataset.noteDeleteConfirm;
       state.notes = state.notes.filter((note) => note.id !== id);
+      if (savedNotePictureInPictureNoteId === id) closeSavedNotePictureInPicture();
       if (getFloatingWidget("note")?.id === id) setFloatingWidget("note", null);
       confirmingNoteDeleteId = null;
       saveState();
@@ -6154,7 +6238,7 @@ const views = {
     <section class="settings-section card" aria-labelledby="data-backup-title">
       <div class="settings-card-heading">
         <h3 id="data-backup-title">Import &amp; export data</h3>
-        <p class="text-muted">Save a backup of your habits, challenges, notes, settings, and progress, or restore a Questify JSON backup. Importing replaces the data on this device.</p>
+        <p class="text-muted">Export on this device, then import that file on another device to move your data across. Importing replaces the data on that device.</p>
       </div>
       <div class="settings-row settings-data-actions">
         <button type="button" class="btn-secondary btn-sm" id="export-data-btn">Export data</button>
@@ -6361,10 +6445,12 @@ const views = {
       ${
         isConfirmingReset
           ? `
-        <div class="confirm-inline">
-          <p>Are you sure? This cannot be undone.</p>
-          <button id="confirm-reset-btn" class="btn-danger btn-sm">Yes, reset everything</button>
-          <button id="cancel-reset-btn" class="btn-secondary btn-sm">Cancel</button>
+        <div class="confirm-inline" role="alertdialog" aria-labelledby="reset-data-confirm-title">
+          <strong id="reset-data-confirm-title">Reset all Questify data?</strong>
+          <p>This permanently removes your habits, challenges, notes, XP, badges, and streak. Export a backup first if you may want this data later.</p>
+          <button type="button" class="btn-secondary btn-sm" data-export-before-loss>Export backup</button>
+          <button type="button" id="confirm-reset-btn" class="btn-danger btn-sm">Reset without export</button>
+          <button type="button" id="cancel-reset-btn" class="btn-secondary btn-sm">Cancel</button>
         </div>
       `
           : ""
@@ -6377,8 +6463,17 @@ const views = {
           <div>Log Out</div>
           <div class="text-muted">Clears your session on this device</div>
         </div>
-        <button id="logout-btn" class="btn-secondary btn-sm">Log Out</button>
+        ${isConfirmingLogout ? "" : `<button id="logout-btn" class="btn-secondary btn-sm">Log Out</button>`}
       </div>
+      ${isConfirmingLogout ? `
+        <div class="confirm-inline" role="alertdialog" aria-labelledby="logout-confirm-title">
+          <strong id="logout-confirm-title">Export your data before logging out?</strong>
+          <p>Your data is stored only in this browser. Logging out clears it from this device. Export first if you want to keep it or move it elsewhere.</p>
+          <button type="button" class="btn-secondary btn-sm" data-export-before-loss>Export backup</button>
+          <button type="button" class="btn-danger btn-sm" data-loss-confirm="logout">Log out without export</button>
+          <button type="button" class="btn-secondary btn-sm" data-loss-cancel="logout">Cancel</button>
+        </div>
+      ` : ""}
     </div>
   `,
 };
@@ -6769,9 +6864,8 @@ function attachChallengesHandlers() {
     if (noteWidget?.mode === "app" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
       setFloatingWidget("note", null);
     } else {
-      if (sessionNotePictureInPictureWindow && !sessionNotePictureInPictureWindow.closed) {
-        closeSessionNotePictureInPicture();
-      }
+      if (isSessionNotePictureInPictureOpen()) closeSessionNotePictureInPicture();
+      if (isSavedNotePictureInPictureOpen()) closeSavedNotePictureInPicture();
       const active = getActiveLockIn();
       if (active) setFloatingWidget("note", { mode: "app", kind: "session", id: active.id });
     }
@@ -7646,14 +7740,6 @@ function attachSettingsHandlers() {
         "is-floating-transparent",
         state.preferences.floatingWindowsTransparent
       );
-      sessionNotePictureInPictureWindow?.document.body.classList.toggle(
-        "is-floating-transparent",
-        state.preferences.floatingWindowsTransparent
-      );
-      savedNotePictureInPictureWindow?.document.body.classList.toggle(
-        "is-floating-transparent",
-        state.preferences.floatingWindowsTransparent
-      );
       renderView();
     };
     floatingTransparencySwitch.addEventListener("click", toggleFloatingTransparency);
@@ -7688,10 +7774,28 @@ function attachSettingsHandlers() {
     });
   }
 
+  document.querySelectorAll("[data-export-before-loss]").forEach((button) => {
+    button.addEventListener("click", exportQuestifyData);
+  });
+
+  document.querySelectorAll("[data-loss-confirm]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.lossConfirm === "logout") logout();
+    });
+  });
+
+  document.querySelectorAll("[data-loss-cancel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      isConfirmingLogout = false;
+      renderView();
+    });
+  });
+
   const logoutBtn = document.getElementById("logout-btn");
   if (logoutBtn) {
     logoutBtn.addEventListener("click", () => {
-      logout();
+      isConfirmingLogout = true;
+      renderView();
     });
   }
 }
@@ -8227,6 +8331,7 @@ function navigateTo(viewName, pushToHistory = true) {
   statusFilter = "all";
   dueFilter = "all";
   isConfirmingReset = false;
+  isConfirmingLogout = false;
   dayDetailDate = null;
   if (destination === "calendar" || destination === "habits") {
     calendarViewDate = new Date(); // always open Calendar on the current month
