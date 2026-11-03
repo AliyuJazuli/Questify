@@ -347,6 +347,10 @@ body.is-lockin-timer-window #pull-refresh-indicator,
 body.is-lockin-timer-window .app-header,
 body.is-lockin-timer-window .app-nav,
 body.is-lockin-timer-window .app-footer,
+body.is-floating-popup-window #pull-refresh-indicator,
+body.is-floating-popup-window .app-header,
+body.is-floating-popup-window .app-nav,
+body.is-floating-popup-window .app-footer,
 body.is-session-note-window #pull-refresh-indicator,
 body.is-session-note-window .app-header,
 body.is-session-note-window .app-nav,
@@ -355,6 +359,7 @@ body.is-session-note-window .app-footer {
 }
 
 body.is-lockin-timer-window .app-main,
+body.is-floating-popup-window .app-main,
 body.is-session-note-window .app-main {
   width: min(100%, 500px);
   max-width: 500px;
@@ -379,6 +384,7 @@ body.is-lockin-focus-window .lockin-open-window-btn {
 body.is-lockin-focus-window,
 body.is-sticky-note-window,
 body.is-lockin-timer-window,
+body.is-floating-popup-window,
 body.is-session-note-window {
   width: 100%;
   height: 100dvh;
@@ -390,6 +396,7 @@ body.is-session-note-window {
 body.is-lockin-focus-window #app,
 body.is-sticky-note-window #app,
 body.is-lockin-timer-window #app,
+body.is-floating-popup-window #app,
 body.is-session-note-window #app {
   display: grid;
   width: 100%;
@@ -402,6 +409,7 @@ body.is-session-note-window #app {
 body.is-lockin-focus-window .app-main,
 body.is-sticky-note-window .app-main,
 body.is-lockin-timer-window .app-main,
+body.is-floating-popup-window .app-main,
 body.is-session-note-window .app-main {
   width: 100%;
   min-width: 0;
@@ -10879,6 +10887,229 @@ body.has-pinned-note:not(.has-pinned-timer) .questify-pip-layout {
 
 .questify-pip-layout .note-pip input {
   min-width: 0;
+}
+
+body.is-floating-popup-window #app {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+body.is-floating-popup-window .app-main {
+  max-width: 540px;
+  padding: clamp(8px, 2vw, 14px);
+  overflow: auto;
+}
+
+.floating-tool-popup {
+  display: grid;
+  min-height: 100%;
+  align-content: start;
+  gap: 10px;
+}
+
+.floating-tool-popup__header,
+.floating-tool-card__heading,
+.floating-tool-popup__actions,
+.floating-tool-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.floating-tool-popup__header h1,
+.floating-tool-card__heading h2 {
+  margin: 0;
+  font-size: clamp(1rem, 3.2vw, 1.25rem);
+}
+
+.floating-tool-popup__header .eyebrow,
+.floating-tool-card__heading .eyebrow {
+  margin: 0 0 3px;
+  font-size: 0.62rem;
+}
+
+.floating-tool-popup__actions {
+  flex-shrink: 0;
+}
+
+.floating-tool-popup__status,
+.floating-tool-updated {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.floating-tool-popup__items {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+}
+
+.floating-tool-card {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  box-shadow: var(--shadow-card);
+}
+
+.floating-tool-card--timer {
+  text-align: center;
+}
+
+.floating-tool-card--timer .floating-tool-card__heading {
+  text-align: left;
+}
+
+.floating-tool-timer {
+  font-size: clamp(1.7rem, 10vw, 2.8rem);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.floating-tool-card--timer .lockin-status {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.floating-tool-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text) 14%, transparent);
+}
+
+.floating-tool-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+}
+
+.floating-tool-card__actions {
+  justify-content: center;
+}
+
+.floating-tool-card--note {
+  color: var(--lockin-note-ink, #302817);
+  border-color: color-mix(in srgb, var(--lockin-note-ink, #302817) 18%, transparent);
+  background: var(--lockin-note-color, #fff1a8);
+}
+
+.floating-tool-card--note input,
+.floating-tool-card--note textarea {
+  width: 100%;
+  min-width: 0;
+  color: inherit;
+  border: 1px solid color-mix(in srgb, var(--lockin-note-ink, #302817) 22%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--lockin-note-color, #fff1a8) 88%, white);
+}
+
+.floating-tool-card--note input {
+  padding: 6px 8px;
+  font-weight: 700;
+}
+
+.floating-tool-card--note textarea {
+  min-height: 94px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.floating-tool-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.floating-tool-popup--pip {
+  height: 100dvh;
+  min-height: 0;
+  padding: 8px;
+  overflow: auto;
+}
+
+.floating-tool-popup--pip .floating-tool-popup__header h1 {
+  font-size: 0.95rem;
+}
+
+.floating-tool-popup--pip .floating-tool-popup__status,
+.floating-tool-popup--pip .floating-tool-popup__header .eyebrow {
+  display: none;
+}
+
+.floating-tool-popup__missing {
+  display: grid;
+  min-height: 100%;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.floating-popup-chooser {
+  width: min(440px, calc(100vw - 28px));
+  max-width: none;
+  padding: 0;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.floating-popup-chooser::backdrop {
+  background: rgb(8 14 26 / 54%);
+  backdrop-filter: blur(5px);
+}
+
+.floating-popup-chooser__card {
+  position: relative;
+  display: grid;
+  gap: 11px;
+  padding: 22px;
+}
+
+.floating-popup-chooser__card h2,
+.floating-popup-chooser__card p {
+  margin: 0;
+}
+
+.floating-popup-chooser__close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+.floating-popup-chooser__new {
+  width: 100%;
+}
+
+.floating-popup-chooser__groups {
+  display: grid;
+  gap: 7px;
+}
+
+.floating-popup-chooser__group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+}
+
+.floating-popup-chooser__group small {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.floating-popup-chooser__hint {
+  font-size: 0.78rem;
 }
 
 @media (max-height: 560px) {
