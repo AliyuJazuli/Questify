@@ -255,6 +255,11 @@ function loadState() {
       state = {
         ...defaultState,
         ...savedState,
+        challenges: Array.isArray(savedState.challenges)
+          ? savedState.challenges
+              .filter((challenge) => challenge && typeof challenge === "object")
+              .map((challenge) => ({ ...challenge }))
+          : defaultState.challenges,
         notes: Array.isArray(savedState.notes)
           ? savedState.notes
               .filter((note) => note && typeof note === "object")
@@ -396,11 +401,9 @@ let isSidebarCollapsed = false;
 let isMobileNavigationOpen = false;
 let lockInPictureInPictureWindow = null;
 let pictureInPictureRequest = null;
+let pictureInPictureRequestedSize = null;
 let floatingPictureInPictureWindow = null;
-let lockInTimerPopupWindow = null;
-let isSessionNotePinnedInPictureInPicture = false;
-let savedNotePictureInPictureNoteId = null;
-let isLockInTimerPinnedInPictureInPicture = false;
+let pictureInPictureItems = [];
 
 function getLockInSyncSignature() {
   const active = getActiveLockIn();
@@ -848,18 +851,14 @@ function getChallengeScheduledDate(challenge) {
   const dateStr = challenge.scheduledDate || 
     (challenge.dateCreated ? challenge.dateCreated.slice(0, 10) : getTodayDateString());
   
-  // Validate date string format (YYYY-MM-DD) and return today if invalid
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    try {
-      const d = new Date(`${dateStr}T00:00:00`);
-      if (!isNaN(d.getTime())) {
-        return dateStr;
-      }
-    } catch (e) {
-      // Invalid date
-    }
-  }
-  return getTodayDateString();
+  return isValidDateString(dateStr) ? dateStr : getTodayDateString();
+}
+
+function isValidDateString(dateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr || "")) return false;
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
 }
 
 // -------------------------------------
@@ -956,7 +955,13 @@ function generateId() {
   return `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 }
 
-function addChallenge(title, difficulty = "easy", scheduledDate = "", category = "general", recurrence = "none") {
+function addChallenge(
+  title,
+  difficulty = "easy",
+  scheduledDate = "",
+  category = "general",
+  recurrence = "none"
+) {
   const result = validateText(title, {
     ...VALIDATION_RULES.challengeTitle,
     fieldName: "Challenge title",
@@ -1267,30 +1272,38 @@ function getHabitAnalytics(period = "week") {
     return { habit, ...habitRate, ...getHabitStreakStats(habit, today) };
   }).sort((a, b) => b.percent - a.percent || b.current - a.current);
 
-  let dailyPoints = [];
-  if (period === "day") {
-    const completedToday = getHabitCompletionsForDate(today);
-    dailyPoints = [{ label: "Today", percent: activeHabits.length ? Math.round((completedToday.length / activeHabits.length) * 100) : 0 }];
-  } else if (period === "week") {
-    dailyPoints = Array.from({ length: 7 }, (_, index) => {
-      const date = addDaysToDateString(startDate, index);
-      const dayRate = getHabitCompletionRate(activeHabits, date, date);
-      return {
-        label: CALENDAR_WEEKDAY_LABELS[new Date(`${date}T00:00:00`).getDay()],
-        date,
-        percent: dayRate.percent,
-      };
-    }).filter((point) => point.date <= today);
-  } else {
-    const monthLength = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate();
-    const buckets = Math.ceil(monthLength / 7);
-    dailyPoints = Array.from({ length: buckets }, (_, index) => {
-      const from = addDaysToDateString(startDate, index * 7);
-      const to = addDaysToDateString(startDate, Math.min(index * 7 + 6, monthLength - 1));
-      const bucketRate = getHabitCompletionRate(activeHabits, from, to);
-      return { label: `Week ${index + 1}`, percent: bucketRate.percent };
-    });
-  }
+  const pointCount = period === "day"
+    ? 1
+    : period === "week"
+    ? 7
+    : new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate();
+  const dailyPoints = Array.from({ length: pointCount }, (_, index) => {
+    const date = period === "day"
+      ? today
+      : addDaysToDateString(startDate, index);
+    const dayRate = getHabitCompletionRate(activeHabits, date, date);
+    const dayDate = new Date(`${date}T00:00:00`);
+    return {
+      date,
+      dayNumber: dayDate.getDate(),
+      weekday: CALENDAR_WEEKDAY_LABELS[dayDate.getDay()],
+      label: period === "day"
+        ? new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(dayDate)
+        : period === "week"
+        ? `${CALENDAR_WEEKDAY_LABELS[dayDate.getDay()]} ${dayDate.getDate()}`
+        : String(dayDate.getDate()),
+      fullLabel: new Intl.DateTimeFormat(undefined, {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      }).format(dayDate),
+      percent: dayRate.expected ? dayRate.percent : null,
+      completed: dayRate.completed,
+      expected: dayRate.expected,
+      isFuture: date > today,
+    };
+  });
 
   const todayCompleted = getHabitCompletionsForDate(today);
   const currentMonthRate = getHabitCompletionRate(activeHabits, startDate, today);
@@ -1325,6 +1338,7 @@ function getHabitAnalytics(period = "week") {
     percent: rate.percent,
     completed: rate.completed,
     expected: rate.expected,
+    hasData: rate.expected > 0,
     activeCount: activeHabits.length,
     totalCount: (state.habits || []).length,
     overallPercent: getHabitOverallCompletionRate(activeHabits),
@@ -1753,7 +1767,6 @@ function attachLockInExitDialogHandlers() {
       }
     });
   });
-
   dialog.querySelector("[data-lockin-exit-action='quit']")?.focus();
 }
 
@@ -2801,14 +2814,14 @@ function showToast(message) {
 // -------------------------------------
 // Habit Calendar: UI-only state (which month is being viewed)
 // -------------------------------------
-let calendarViewDate = new Date(); // defaults to current month on load
-let weekViewDate = new Date(); // defaults to current week on load
+let calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
+let weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
 
 // -------------------------------------
 // Habit Calendar: data aggregation
 // -------------------------------------
 
-// Returns actual habit, challenge, and XP activity keyed by date for a month.
+// Returns habit check-in activity keyed by date for a month.
 function getCalendarActivityForMonth(year, month) {
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const activityByDate = new Map();
@@ -2822,19 +2835,8 @@ function getCalendarActivityForMonth(year, month) {
       count: completedHabits.length,
       habitCount: completedHabits.length,
       habitTotal: eligibleHabits.length,
-      challengeCount: 0,
-      xp: getHabitXpForDate(dateStr),
     });
   }
-
-  getCompletedChallenges().forEach((challenge) => {
-    const dateStr = (challenge.dateCompleted || challenge.dateCreated || "").slice(0, 10);
-    const activity = activityByDate.get(dateStr);
-    if (!activity) return;
-    activity.challengeCount += 1;
-    activity.count += 1;
-    activity.xp += Number(challenge.xpValue) || 0;
-  });
 
   return activityByDate;
 }
@@ -2843,8 +2845,6 @@ function getCalendarMonthSummary(year, month) {
   const activityByDate = getCalendarActivityForMonth(year, month);
   const today = getTodayDateString();
   let habitCheckIns = 0;
-  let challengeWins = 0;
-  let xpEarned = 0;
   let expectedHabitCheckIns = 0;
   let daysWithActivity = 0;
   let currentRun = 0;
@@ -2856,8 +2856,6 @@ function getCalendarMonthSummary(year, month) {
   trackedDates.forEach((dateStr) => {
     const activity = activityByDate.get(dateStr);
     habitCheckIns += activity.habitCount;
-    challengeWins += activity.challengeCount;
-    xpEarned += activity.xp;
     expectedHabitCheckIns += activity.habitTotal;
 
     if (activity.count > 0) {
@@ -2874,8 +2872,6 @@ function getCalendarMonthSummary(year, month) {
 
   return {
     habitCheckIns,
-    challengeWins,
-    xpEarned,
     completionRate: expectedHabitCheckIns
       ? Math.round((habitCheckIns / expectedHabitCheckIns) * 100)
       : null,
@@ -2925,8 +2921,9 @@ function getCalendarGridData(year, month) {
       count: activity.count,
       habitCount: activity.habitCount,
       habitTotal: activity.habitTotal,
-      challengeCount: activity.challengeCount,
-      xp: activity.xp,
+      habitPercent: dateStr > todayStr || !activity.habitTotal
+        ? null
+        : Math.round((activity.habitCount / activity.habitTotal) * 100),
       isToday: dateStr === todayStr,
       isFuture: dateStr > todayStr,
       habitStatus,
@@ -2949,73 +2946,6 @@ function getIntensityLevel(count) {
   if (count === 2) return 2;
   if (count === 3) return 3;
   return 4; // 4+
-}
-
-// -------------------------------------
-// Weekly Wins: current week (Sun-Sat) summary
-// -------------------------------------
-function getWeeklyWins() {
-  const now = new Date();
-  const startOfWeek = new Date(now);
-  startOfWeek.setDate(now.getDate() - now.getDay()); // back up to Sunday
-  startOfWeek.setHours(0, 0, 0, 0);
-
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
-  endOfWeek.setHours(23, 59, 59, 999);
-
-  const thisWeekCompletions = getCompletedChallenges().filter((c) => {
-    const referenceDate = c.dateCompleted || c.dateCreated;
-    const d = new Date(referenceDate);
-    return d >= startOfWeek && d <= endOfWeek;
-  });
-
-  const thisWeekHabitCompletions = (state.habits || []).flatMap((habit) =>
-    (Array.isArray(habit.completedDates) ? habit.completedDates : [])
-      .filter((dateStr) => {
-        const d = new Date(`${dateStr}T00:00:00`);
-        return d >= startOfWeek && d <= endOfWeek;
-      })
-      .map((dateStr) => ({ habit, dateStr }))
-  );
-  const weekStartDate = addDaysToDateString(getTodayDateString(), -now.getDay());
-  const weekEndDate = addDaysToDateString(weekStartDate, 6);
-  const xpEarned = thisWeekCompletions.reduce((sum, c) => sum + c.xpValue, 0) +
-    (state.habitXpLedger || [])
-      .filter((entry) => entry.date >= weekStartDate && entry.date <= weekEndDate)
-      .reduce((sum, entry) => sum + entry.amount, 0);
-
-  // Find the day with the most completions this week
-  const dayCounts = {};
-  thisWeekCompletions.forEach((c) => {
-    const referenceDate = c.dateCompleted || c.dateCreated;
-    const key = referenceDate.slice(0, 10);
-    dayCounts[key] = (dayCounts[key] || 0) + 1;
-  });
-  thisWeekHabitCompletions.forEach(({ dateStr }) => {
-    dayCounts[dateStr] = (dayCounts[dateStr] || 0) + 1;
-  });
-
-  let bestDay = null;
-  let bestDayCount = 0;
-  Object.entries(dayCounts).forEach(([dateStr, count]) => {
-    if (count > bestDayCount) {
-      bestDay = dateStr;
-      bestDayCount = count;
-    }
-  });
-
-  const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const bestDayLabel = bestDay
-    ? weekdayNames[new Date(`${bestDay}T00:00:00`).getDay()]
-    : null;
-
-  return {
-    completedCount: thisWeekCompletions.length + thisWeekHabitCompletions.length,
-    xpEarned,
-    bestDayLabel,
-    bestDayCount,
-  };
 }
 
 // -------------------------------------
@@ -3604,14 +3534,25 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
   const moreIncompleteHabits = isDashboardReview
     ? Math.max(0, activeHabits.filter((habit) => !completedIds.has(habit.id)).length - reviewHabits.length)
     : 0;
-  const completionPercent = activeHabits.length ? Math.round((completedCount / activeHabits.length) * 100) : 0;
+  const completionPercent = dateStr > getTodayDateString() || !activeHabits.length
+    ? null
+    : Math.round((completedCount / activeHabits.length) * 100);
   const challenges = getDayDetail(dateStr);
   const challengeXp = challenges.completed.reduce((total, challenge) => total + challenge.xpValue, 0);
   const habitXp = getHabitXpForDate(dateStr);
-  const recentDates = Array.from({ length: 7 }, (_, index) => addDaysToDateString(dateStr, index - 6));
   const bestStreak = getOverallHabitStreakStats(state, dateStr);
+  const dayStats = [
+    { value: activeHabits.length ? `${completedCount}/${activeHabits.length}` : "—", label: "habits" },
+    { value: completionPercent === null ? "—" : `${completionPercent}%`, label: "completion" },
+    ...(isDashboardReview || calendarViewMode !== "month"
+      ? [{ value: habitXp + challengeXp, label: "XP earned" }]
+      : []),
+    { value: bestStreak.current, label: "day streak" },
+  ];
   const canCheckIn = dateStr <= getTodayDateString();
-  const status = !activeHabits.length
+  const status = dateStr > getTodayDateString()
+    ? "Upcoming day"
+    : !activeHabits.length
     ? "No active habits"
     : completedCount === activeHabits.length
     ? "All habits complete"
@@ -3631,27 +3572,21 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
         </div>
         ${isDashboardReview
           ? `<button type="button" class="btn-secondary btn-sm" data-navigate="habits">Manage habits</button>`
-          : calendarViewMode === "day" ? `
+          : `
           <div class="calendar-day-details__controls">
-            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
-            <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
-            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="1" aria-label="Next day" ${dateStr >= getTodayDateString() ? "disabled" : ""}>›</button>
+            ${calendarViewMode === "day" ? `
+              <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
+              <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
+              <button type="button" class="calendar-nav-btn" data-calendar-day-offset="1" aria-label="Next day">›</button>
+            ` : ""}
+            <button type="button" class="btn-secondary btn-sm" data-navigate="habits">${activeHabits.length ? "Manage habits" : "Add a habit"}</button>
           </div>
-        ` : ""}
+        `}
       </div>
-      <div class="calendar-day-details__stats">
-        <div><strong>${completedCount}/${activeHabits.length}</strong><span>habits</span></div>
-        <div><strong>${completionPercent}%</strong><span>completion</span></div>
-        <div><strong>${habitXp + challengeXp}</strong><span>XP earned</span></div>
-        <div><strong>${bestStreak.current}</strong><span>day streak</span></div>
-      </div>
-      <div class="calendar-streak-strip" aria-label="Seven-day habit activity">
-        ${recentDates.map((recentDate) => {
-          const hasActivity = getHabitCompletionsForDate(recentDate, state, true).length > 0;
-          const day = new Date(`${recentDate}T00:00:00`);
-          return `<span class="${hasActivity ? "is-complete" : recentDate < getTodayDateString() ? "is-missed" : ""}" title="${escapeHTML(recentDate)}">${CALENDAR_WEEKDAY_LABELS[day.getDay()].slice(0, 1)}</span>`;
-        }).join("")}
-        <small>7-day rhythm</small>
+      <div class="calendar-day-details__stats calendar-day-details__stats--${dayStats.length}">
+        ${dayStats.map(({ value, label: statLabel }) => `
+          <div><strong>${value}</strong><span>${statLabel}</span></div>
+        `).join("")}
       </div>
       <div class="calendar-day-details__habits">
         <h4>${isDashboardReview ? "Next up" : "Habits"}</h4>
@@ -3671,13 +3606,13 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
         `).join("") : `<p class="text-muted">${isDashboardReview && activeHabits.length ? "All habits checked in for today." : "No habits were set up by this date."}</p>`}
         ${moreIncompleteHabits ? `<p class="text-muted calendar-day-details__more-habits">${moreIncompleteHabits} more to do · Open Habits to see the full list.</p>` : ""}
       </div>
-      ${challenges.completed.length ? `
+      ${(isDashboardReview || calendarViewMode !== "month") && challenges.completed.length ? `
         <div class="calendar-day-details__challenges">
           <h4>Challenges completed (${challenges.completed.length})</h4>
           ${challenges.completed.map((challenge) => renderDayDetailRow(challenge, true)).join("")}
         </div>
       ` : ""}
-      ${challenges.active.length ? `
+      ${(isDashboardReview || calendarViewMode !== "month") && challenges.active.length ? `
         <div class="calendar-day-details__challenges">
           <h4>Scheduled challenges (${challenges.active.length})</h4>
           ${challenges.active.map((challenge) => renderDayDetailRow(challenge, false)).join("")}
@@ -3711,17 +3646,17 @@ function renderCalendarGrid() {
         .filter(Boolean)
         .join(" ");
 
-      const habitSummary = cell.habitStatus === "upcoming"
-        ? "—"
-        : `${cell.habitCount}/${cell.habitTotal}`;
       const habitLabel = cell.habitStatus === "upcoming"
-        ? "future date"
+        ? "upcoming"
+        : cell.habitTotal === 0
+        ? "no active habits"
         : `${cell.habitCount} of ${cell.habitTotal} habits completed`;
-      const label = `${CALENDAR_MONTH_NAMES[month]} ${cell.day}, ${year}: ${habitLabel}, ${cell.challengeCount} challenges completed, ${cell.xp} XP earned`;
-      const title = `${habitLabel} · ${cell.challengeCount} challenges · ${cell.xp} XP`;
+      const completionLabel = cell.habitPercent === null ? "—" : `${cell.habitPercent}%`;
+      const label = `${CALENDAR_MONTH_NAMES[month]} ${cell.day}, ${year}: ${habitLabel}${cell.habitPercent === null ? "" : `, ${cell.habitPercent}% complete`}`;
+      const title = `${habitLabel}${cell.habitPercent === null ? "" : ` · ${cell.habitPercent}% complete`}`;
 
       return cell.inMonth
-        ? `<button type="button" class="${classes}" data-calendar-date="${cell.dateStr}" aria-pressed="${cell.dateStr === calendarSelectedDate}" aria-label="${escapeHTML(label)}" title="${escapeHTML(title)}"><span class="calendar-day__number">${cell.day}</span><span class="calendar-day__summary">${habitSummary}${cell.habitStatus === "upcoming" ? "" : `<span class="calendar-day__summary-label"> habits</span>`}</span>${cell.challengeCount > 0 ? `<span class="calendar-day__challenges">${cell.challengeCount} win${cell.challengeCount === 1 ? "" : "s"}</span>` : ""}${cell.xp > 0 ? `<span class="calendar-day__xp">+${cell.xp} XP</span>` : ""}${cell.count ? `<i aria-hidden="true"></i>` : ""}</button>`
+        ? `<button type="button" class="${classes}" data-calendar-date="${cell.dateStr}" aria-pressed="${cell.dateStr === calendarSelectedDate}" aria-label="${escapeHTML(label)}" title="${escapeHTML(title)}"><span class="calendar-day__number">${cell.day}</span><span class="calendar-day__completion">${completionLabel}</span><span class="calendar-day__summary">${cell.habitTotal ? `${cell.habitCount}/${cell.habitTotal} habits` : cell.habitStatus === "upcoming" ? "Upcoming" : "No habits"}</span>${cell.count ? `<i aria-hidden="true"></i>` : ""}</button>`
         : `<div class="${classes}" aria-hidden="true">${cell.day}</div>`;
     })
     .join("");
@@ -3762,15 +3697,15 @@ function renderCalendarMonthInsights() {
         <p class="text-muted">${summary.hasTrackedDates ? `${summary.daysWithActivity} active day${summary.daysWithActivity === 1 ? "" : "s"}` : "No tracked days yet"}</p>
       </div>
       <div class="calendar-month-insights__stats">
-        <div><strong>${summary.habitCheckIns}</strong><span>habit check-ins</span></div>
-        <div><strong>${summary.challengeWins}</strong><span>challenges completed</span></div>
-        <div><strong>${summary.xpEarned}</strong><span>XP earned</span></div>
         <div><strong>${summary.completionRate === null ? "—" : `${summary.completionRate}%`}</strong><span>habit completion</span></div>
+        <div><strong>${summary.habitCheckIns}</strong><span>habit check-ins</span></div>
+        <div><strong>${summary.daysWithActivity}</strong><span>active days</span></div>
+        <div><strong>${summary.bestRun}</strong><span>best daily run</span></div>
       </div>
       <p class="calendar-month-insights__best text-muted">
         ${summary.bestDay
-          ? `Most active day: <strong>${bestDayLabel}</strong> with ${summary.bestDay.count} completed item${summary.bestDay.count === 1 ? "" : "s"}. Longest activity run: ${summary.bestRun} consecutive day${summary.bestRun === 1 ? "" : "s"}.`
-          : "Complete a habit or challenge to start building your monthly activity history."}
+          ? `Most check-ins: <strong>${bestDayLabel}</strong> with ${summary.bestDay.count} completed habit${summary.bestDay.count === 1 ? "" : "s"}. Longest run: ${summary.bestRun} consecutive day${summary.bestRun === 1 ? "" : "s"}.`
+          : "Check in to a habit to start building your monthly activity history."}
       </p>
     </section>
   `;
@@ -3874,108 +3809,8 @@ function renderHabitCheckButton(habit, dateStr) {
   `;
 }
 
-function renderHabitDailyRow(habit, dateStr) {
-  const isComplete = Array.isArray(habit.completedDates) && habit.completedDates.includes(dateStr);
-  const xpEntry = (state.habitXpLedger || []).find((entry) => entry.habitId === habit.id && entry.date === dateStr);
-  const reward = CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium;
-  return `
-    <div class="habit-daily-row ${isComplete ? "is-complete" : ""}">
-      ${renderHabitCheckButton(habit, dateStr)}
-      <span class="habit-daily-row__identity">
-        <span class="habit-daily-row__title">${escapeHTML(habit.title)}</span>
-        ${renderHabitCategoryTag(habit.category)}
-      </span>
-      <span class="habit-daily-row__xp">${xpEntry ? `+${xpEntry.amount} XP earned` : `+${reward} XP`}</span>
-    </div>
-  `;
-}
-
-function renderTodayHabitsCard() {
-  const todayStr = getTodayDateString();
-  const { completed, active } = getDayDetail(todayStr);
-  const habits = getActiveHabits();
-  const completedHabits = getHabitCompletionsForDate(todayStr);
-  const nextHabits = habits.filter((habit) =>
-    !Array.isArray(habit.completedDates) || !habit.completedDates.includes(todayStr)
-  ).slice(0, 3);
-  const remainingHabits = Math.max(0, habits.filter((habit) =>
-    !Array.isArray(habit.completedDates) || !habit.completedDates.includes(todayStr)
-  ).length - nextHabits.length);
-  const totalXp = completed.reduce((sum, c) => sum + c.xpValue, 0) + getHabitXpForDate(todayStr);
-  const goalProgress = getDailyGoalProgress();
-
-  const taskListHTML =
-    completed.length === 0 && active.length === 0
-      ? `<p class="text-muted" style="margin-top: var(--space-md);">Nothing scheduled for today yet.</p>`
-      : `
-        ${
-          active.length > 0
-            ? `
-              <div class="day-detail-section" style="margin-top: var(--space-md);">
-                <h4>To Do (${active.length})</h4>
-                ${active.map((c) => renderDayDetailRow(c, false)).join("")}
-              </div>
-            `
-            : ""
-        }
-        ${
-          completed.length > 0
-            ? `
-              <div class="day-detail-section" style="margin-top: var(--space-md);">
-                <h4>Completed (${completed.length})</h4>
-                ${completed.map((c) => renderDayDetailRow(c, true)).join("")}
-              </div>
-            `
-            : ""
-        }
-      `;
-
-  return `
-    <div class="card today-habits-card">
-      <div class="habit-card-heading">
-        <div>
-          <p class="dashboard-section__eyebrow">YOUR DAILY RHYTHM</p>
-          <h3>Today's habits</h3>
-        </div>
-        <button class="btn-secondary btn-sm" type="button" data-navigate="habits">Manage habits</button>
-      </div>
-      <div class="profile-stats today-habits-card__stats" style="grid-template-columns: repeat(3, 1fr); margin-top: 0;">
-        <div class="stat-card">
-          <div class="stat-value">${state.user.streak}</div>
-          <div class="stat-label text-muted">Streak</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value">${completedHabits.length}/${habits.length}</div>
-          <div class="stat-label text-muted">Habits</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value">${totalXp}</div>
-          <div class="stat-label text-muted">XP Today</div>
-        </div>
-      </div>
-      ${habits.length ? `
-        <div class="habit-daily-list">
-          ${nextHabits.length
-            ? nextHabits.map((habit) => renderHabitDailyRow(habit, todayStr)).join("")
-            : `<p class="text-muted habit-empty-note">You're all caught up for today.</p>`}
-        </div>
-        ${remainingHabits ? `<p class="text-muted calendar-day-details__more-habits">${remainingHabits} more to do · Manage habits to see the full list.</p>` : ""}
-      ` : `
-        <p class="text-muted habit-empty-note">No daily habits yet. Add a few small rituals to start tracking your consistency.</p>
-      `}
-      <div class="habit-calendar-challenges">
-        <div class="habit-card-heading">
-          <h4>Challenges</h4>
-          <span class="text-muted">${goalProgress.completed}/${goalProgress.goal} daily goal</span>
-        </div>
-      ${taskListHTML}
-      </div>
-    </div>
-  `;
-}
-
 // -------------------------------------
-// Habit Calendar: day-detail modal (weekly view)
+// Habit Calendar: selected-day summary
 // -------------------------------------
 // Gathers everything relevant to one specific date: challenges completed
 // that day, plus anything still active/scheduled for that day.
@@ -4092,12 +3927,37 @@ function renderHabitTracker() {
   const lastDay = days[6];
   const todayStr = getTodayDateString();
   const analytics = getHabitAnalytics(habitAnalyticsPeriod);
-  const difficultyOptions = (selected) => Object.entries(CONFIG.HABIT_XP_REWARDS)
-    .map(([difficulty, reward]) => `<option value="${difficulty}" ${selected === difficulty ? "selected" : ""}>${difficulty[0].toUpperCase()}${difficulty.slice(1)} · ${reward} XP</option>`)
-    .join("");
-  const categoryOptions = (selected = "general") => HABIT_CATEGORY_IDS
-    .map((categoryId) => `<option value="${categoryId}" ${getHabitCategoryId(selected) === categoryId ? "selected" : ""}>${getCategoryConfig(categoryId).icon} ${getCategoryConfig(categoryId).label}</option>`)
-    .join("");
+  const difficultyOptions = (selected, name = "difficulty") => `
+    <fieldset class="habit-choice-field">
+      <legend>Effort</legend>
+      <div class="habit-choice-grid habit-choice-grid--difficulty">
+        ${Object.entries(CONFIG.HABIT_XP_REWARDS).map(([difficulty, reward]) => `
+          <label class="habit-choice habit-choice--difficulty">
+            <input type="radio" name="${name}" value="${difficulty}" ${selected === difficulty ? "checked" : ""} required>
+            <span class="habit-choice__name">${difficulty[0].toUpperCase()}${difficulty.slice(1)}</span>
+            <span class="habit-choice__detail">+${reward} XP</span>
+          </label>
+        `).join("")}
+      </div>
+    </fieldset>
+  `;
+  const categoryOptions = (selected = "general", name = "category") => `
+    <fieldset class="habit-choice-field">
+      <legend>Category</legend>
+      <div class="habit-choice-grid habit-choice-grid--category">
+        ${HABIT_CATEGORY_IDS.map((categoryId) => {
+          const category = getCategoryConfig(categoryId);
+          return `
+            <label class="habit-choice habit-choice--category">
+              <input type="radio" name="${name}" value="${categoryId}" ${getHabitCategoryId(selected) === categoryId ? "checked" : ""} required>
+              <span class="habit-choice__icon" aria-hidden="true">${category.icon}</span>
+              <span class="habit-choice__name">${escapeHTML(category.label)}</span>
+            </label>
+          `;
+        }).join("")}
+      </div>
+    </fieldset>
+  `;
   const renderHabitManagerRow = (habit, isArchived = false) => {
     const stats = getHabitCompletionRate([habit], habit.createdDate || (habit.createdAt || "").slice(0, 10), getTodayDateString());
     const streak = getHabitStreakStats(habit);
@@ -4136,8 +3996,8 @@ function renderHabitTracker() {
             <form class="habit-edit-form" data-habit-edit-form="${escapeHTML(habit.id)}">
               <label>Habit name<input name="title" value="${escapeHTML(habit.title)}" maxlength="50" required></label>
               <label>Description<input name="description" value="${escapeHTML(habit.description || "")}" maxlength="180" placeholder="What does this habit mean to you?"></label>
-              <label>Difficulty<select name="difficulty">${difficultyOptions(difficulty)}</select></label>
-              <label>Category<select name="category">${categoryOptions(habit.category)}</select></label>
+              ${difficultyOptions(difficulty)}
+              ${categoryOptions(habit.category)}
               <p class="error-text" data-habit-edit-error></p>
               <button type="submit" class="btn btn-sm">Save changes</button>
             </form>
@@ -4164,6 +4024,12 @@ function renderHabitTracker() {
     </div>
   `;
   const analyticsTitle = { day: "Daily performance", week: "Weekly performance", month: "Monthly performance" }[habitAnalyticsPeriod];
+  const performancePoints = habitAnalyticsPeriod === "month"
+    ? [
+        ...Array.from({ length: new Date(`${analytics.startDate}T00:00:00`).getDay() }, () => null),
+        ...analytics.dailyPoints,
+      ]
+    : analytics.dailyPoints;
 
   return `
     <section class="view-heading">
@@ -4206,26 +4072,36 @@ function renderHabitTracker() {
         </div>
       </div>
       <div class="habit-analytics-summary">
-        <div><strong>${analytics.percent}%</strong><span>${analytics.completed} / ${analytics.expected} check-ins</span></div>
-        ${habitAnalyticsPeriod === "day" ? `
-          <p>${analytics.todayCompleted} completed · ${analytics.todayRemaining} remaining today</p>
-          <div class="habit-progress-track" role="progressbar" aria-label="Today's habit completion" aria-valuenow="${analytics.percent}" aria-valuemin="0" aria-valuemax="100"><span style="width:${analytics.percent}%"></span></div>
+        <div class="habit-analytics-summary__metric">
+          <strong>${analytics.hasData ? `${analytics.percent}%` : "—"}</strong>
+          <span>${analytics.hasData
+            ? `${analytics.completed} of ${analytics.expected} daily check-ins`
+            : "No active habits to measure yet."}</span>
+        </div>
+        ${analytics.hasData ? `
+          <div class="habit-progress-track" role="progressbar" aria-label="${analyticsTitle} habit completion" aria-valuenow="${analytics.percent}" aria-valuemin="0" aria-valuemax="100"><span style="width:${analytics.percent}%"></span></div>
         ` : ""}
         ${habitAnalyticsPeriod === "month" ? `
-          <p>${analytics.bestPerformingDay ? `Best day: ${analytics.bestPerformingDay.label} (${analytics.bestPerformingDay.percent}%)` : "No habit activity yet this month."} · ${analytics.monthlyDelta === null ? "No comparable activity last month." : `${analytics.monthlyDelta >= 0 ? "+" : ""}${analytics.monthlyDelta}% vs last month to date`}</p>
-        ` : ""}
+          <p>${analytics.bestPerformingDay ? `Best weekday: ${analytics.bestPerformingDay.label} (${analytics.bestPerformingDay.percent}%)` : "No habit activity yet this month."} · ${analytics.monthlyDelta === null ? "No comparable activity last month." : `${analytics.monthlyDelta >= 0 ? "+" : ""}${analytics.monthlyDelta}% vs last month to date`}</p>
+        ` : habitAnalyticsPeriod === "day" ? `
+          <p>${analytics.hasData ? `${analytics.todayCompleted} complete · ${analytics.todayRemaining} remaining today` : "Add an active habit to start tracking daily performance."}</p>
+        ` : `
+          <p>Each tile shows one day of this week's habit check-ins.</p>
+        `}
       </div>
-      ${analytics.dailyPoints.length ? `
-        <div class="habit-analytics-chart" role="img" aria-label="${analyticsTitle} completion chart">
-          ${analytics.dailyPoints.map((point) => `
-            <div class="habit-analytics-chart__column" title="${point.label}: ${point.percent}%">
-              <span class="habit-analytics-chart__value">${point.percent}%</span>
-              <div class="habit-analytics-chart__track"><span style="height:${point.percent}%"></span></div>
-              <span class="habit-analytics-chart__label">${escapeHTML(point.label)}</span>
+      ${analytics.activeCount && analytics.dailyPoints.length ? `
+        <div class="habit-performance-days ${habitAnalyticsPeriod === "day" ? "is-day" : ""} ${habitAnalyticsPeriod === "month" ? "is-month" : "is-week"}" role="group" aria-label="${analyticsTitle}, shown by day">
+          ${performancePoints.map((point) => point ? `
+            <div class="habit-performance-day ${point.percent === null ? "is-no-data" : ""} ${point.isFuture ? "is-future" : ""} ${point.date === todayStr ? "is-today" : ""}" role="img" aria-label="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}% complete`}`)}" title="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}%`}`)}">
+              <span class="habit-performance-day__weekday">${habitAnalyticsPeriod === "month" ? point.weekday.slice(0, 1) : escapeHTML(point.weekday)}</span>
+              <strong class="habit-performance-day__date">${point.dayNumber}</strong>
+              <span class="habit-performance-day__percent">${point.percent === null ? "—" : `${point.percent}%`}</span>
+              ${habitAnalyticsPeriod !== "month" ? `<span class="habit-performance-day__count">${point.percent === null ? point.isFuture ? "Upcoming" : "No habits" : `${point.completed}/${point.expected} habits`}</span>` : ""}
+              <span class="habit-performance-day__track" aria-hidden="true"><span style="width:${point.percent ?? 0}%"></span></span>
             </div>
-          `).join("")}
+          ` : `<span class="habit-performance-day__spacer" aria-hidden="true"></span>`).join("")}
         </div>
-      ` : `<p class="text-muted">Add a habit to start building an analytics history.</p>`}
+      ` : `<p class="text-muted">Add an active habit to see performance here.</p>`}
       <div class="habit-analytics-lists">
         <div>
           <h4>Most consistent</h4>
@@ -4246,14 +4122,14 @@ function renderHabitTracker() {
         </div>
       </div>
       <form id="add-habit-form" class="add-habit-form" novalidate>
-        <label class="sr-only" for="add-habit-input">New daily habit</label>
-        <input id="add-habit-input" name="title" type="text" maxlength="50" placeholder="e.g. Read for 10 minutes" autocomplete="off" required>
-        <label class="sr-only" for="add-habit-description">Habit description</label>
-        <input id="add-habit-description" name="description" type="text" maxlength="180" placeholder="Description (optional)">
-        <label class="sr-only" for="add-habit-difficulty">Habit difficulty</label>
-        <select id="add-habit-difficulty" name="difficulty">${difficultyOptions("medium")}</select>
-        <label class="sr-only" for="add-habit-category">Habit category</label>
-        <select id="add-habit-category" name="category">${categoryOptions()}</select>
+        <div class="add-habit-form__inputs">
+          <label class="sr-only" for="add-habit-input">New daily habit</label>
+          <input id="add-habit-input" name="title" type="text" maxlength="50" placeholder="e.g. Read for 10 minutes" autocomplete="off" required>
+          <label class="sr-only" for="add-habit-description">Habit description</label>
+          <input id="add-habit-description" name="description" type="text" maxlength="180" placeholder="Description (optional)">
+        </div>
+        ${difficultyOptions("medium")}
+        ${categoryOptions()}
         <button class="btn" type="submit">Add habit</button>
       </form>
       <p class="error-text" id="add-habit-error" role="status"></p>
@@ -4339,35 +4215,6 @@ function renderHabitTracker() {
   `;
 }
 
-function renderWeeklyWinsCard() {
-  const wins = getWeeklyWins();
-
-  return `
-    <div class="card weekly-wins-card">
-      <h3 style="margin-top:0;">This Week's Wins</h3>
-      <div class="weekly-wins-grid">
-        <div class="stat-card">
-          <div class="stat-value">${wins.completedCount}</div>
-          <div class="stat-label text-muted">Completed</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value">${wins.xpEarned}</div>
-          <div class="stat-label text-muted">XP Earned</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value">${wins.bestDayCount}</div>
-          <div class="stat-label text-muted">Best Day</div>
-        </div>
-      </div>
-      ${
-        wins.bestDayLabel
-          ? `<div class="weekly-wins-best-day text-muted">🏅 Your strongest day this week was <strong>${wins.bestDayLabel}</strong> with ${wins.bestDayCount} completed.</div>`
-          : `<div class="weekly-wins-best-day text-muted">Complete a challenge or log a habit to start this week's recap.</div>`
-      }
-    </div>
-  `;
-}
-
 // -------------------------------------
 // Lock In: panel render helper
 // -------------------------------------
@@ -4405,7 +4252,7 @@ function renderLockInStickyNote() {
         <label id="lockin-note-title" for="lockin-note-input">Sticky note</label>
         <span id="lockin-note-saved" role="status">${savedNote ? "Saved to Sticky Notes" : "Session only"}</span>
         ${isSessionNoteWindow ? `
-          <button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Choose popup" : "Pin note"}</button>
+          <button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note above windows"}</button>
           <button type="button" class="btn-secondary btn-sm" data-session-note-window-close aria-label="Close sticky note">×</button>
         ` : ""}
       </div>
@@ -4420,12 +4267,12 @@ function renderLockInStickyNote() {
       </div>
       <div class="lockin-note-actions">
         ${!isSessionNoteWindow
-          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Choose popup" : "Pin note"}</button>`
+          ? `<button type="button" class="btn-secondary btn-sm" id="lockin-session-note-pip-btn">${isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note above windows"}</button>`
           : ""}
         <button type="button" class="btn-secondary btn-sm" id="lockin-save-note-btn">${savedNote ? "Update Sticky Notes" : "Save to Sticky Notes"}</button>
       </div>
       ${!isSessionNoteWindow
-        ? `<p class="lockin-note-hint text-muted">Pin the timer and note in separate popups, or choose an existing popup.</p>`
+        ? `<p class="lockin-note-hint text-muted">Pin the timer and note above other windows. Both can stay together in the same Picture-in-Picture window.</p>`
         : ""}
     </section>
   `;
@@ -4616,136 +4463,26 @@ function getFloatingPopupLabel(group) {
     : labels[0] || "Floating popup";
 }
 
-function getFloatingPopupWindowName(id) {
-  return `questify-floating-${id}`;
-}
-
-function isFloatingPopupItemPinned(item) {
-  return getFloatingPopupGroups().some((group) =>
-    group.items.some((pinnedItem) => pinnedItem.kind === item.kind && pinnedItem.id === item.id)
+function isPictureInPictureItemPinned(item) {
+  return pictureInPictureItems.some((pinnedItem) =>
+    pinnedItem.kind === item.kind && pinnedItem.id === item.id
   );
-}
-
-function createFloatingPopup(item) {
-  const id = generateId();
-  const group = { id, items: [item] };
-  if (!saveFloatingPopupGroup(group)) return;
-  const popupUrl = new URL(window.location.href);
-  ["focus", "note", "timer", "session-note"].forEach((key) => popupUrl.searchParams.delete(key));
-  popupUrl.searchParams.set("floating-window", id);
-  popupUrl.hash = "";
-  const popup = window.open(
-    popupUrl.toString(),
-    getFloatingPopupWindowName(id),
-    "popup=yes,width=400,height=440,resizable=yes"
-  );
-  if (!popup) {
-    deleteFloatingPopupGroup(id);
-    showToast("The browser blocked the popup. Allow pop-ups for Questify and try again.");
-    return;
-  }
-  popup.focus();
-  showToast("Popup opened. Use “Pin above windows” inside it; regular popups may not stay on top.");
-}
-
-function addFloatingPopupItem(groupId, item) {
-  const group = getFloatingPopupGroup(groupId);
-  if (!group) {
-    showToast("That floating popup is no longer available. Create a new popup instead.");
-    return;
-  }
-  const target = window.open("", getFloatingPopupWindowName(groupId));
-  if (!target) {
-    showToast("Questify couldn't focus that popup. Allow pop-ups or create a new one.");
-    return;
-  }
-  let targetUrl;
-  try {
-    targetUrl = new URL(target.location.href);
-  } catch (error) {
-    console.error("Could not inspect the existing floating popup:", error);
-    target.close();
-    showToast("Questify couldn't verify that popup. Create a new one instead.");
-    return;
-  }
-  if (targetUrl.searchParams.get("floating-window") !== groupId) {
-    target.close();
-    deleteFloatingPopupGroup(groupId);
-    showToast("That popup was closed. Create a new popup instead.");
-    return;
-  }
-  if (!group.items.some((pinnedItem) => pinnedItem.kind === item.kind && pinnedItem.id === item.id)) {
-    group.items.push(item);
-    if (!saveFloatingPopupGroup(group)) return;
-  }
-  target.focus();
-  showToast("Added to the existing popup.");
-}
-
-function showFloatingPopupChooser(item) {
-  if (isMobileDevice()) {
-    showPictureInPictureDeviceMessage();
-    return;
-  }
-  const existingDialog = document.getElementById("floating-popup-chooser");
-  existingDialog?.remove();
-  const groups = getFloatingPopupGroups();
-  const dialog = document.createElement("dialog");
-  dialog.id = "floating-popup-chooser";
-  dialog.className = "floating-popup-chooser";
-  dialog.setAttribute("aria-labelledby", "floating-popup-chooser-title");
-  dialog.innerHTML = `
-    <form method="dialog" class="floating-popup-chooser__card">
-      <button type="submit" class="floating-popup-chooser__close btn-secondary btn-sm" aria-label="Close">×</button>
-      <p class="eyebrow">Floating tools</p>
-      <h2 id="floating-popup-chooser-title">Where should this open?</h2>
-      <p class="text-muted">Create a separate popup, or add this tool to one you already have open.</p>
-      <button type="button" class="btn floating-popup-chooser__new" data-floating-popup-create>Create a new popup</button>
-      ${groups.length ? `
-        <div class="floating-popup-chooser__groups">
-          <strong>Add to an existing popup</strong>
-          ${groups.map((group) => `
-            <button type="button" class="btn-secondary floating-popup-chooser__group" data-floating-popup-add="${escapeAttribute(group.id)}">
-              <span>${escapeHTML(getFloatingPopupLabel(group))}</span>
-              <small>${group.items.length} ${group.items.length === 1 ? "tool" : "tools"}</small>
-            </button>
-          `).join("")}
-        </div>
-      ` : ""}
-      <p class="floating-popup-chooser__hint text-muted">To stay above other windows, use the Pin button in the popup. Browser support varies.</p>
-    </form>
-  `;
-  document.body.append(dialog);
-  dialog.showModal();
-  dialog.querySelector("[data-floating-popup-create]")?.addEventListener("click", () => {
-    dialog.close();
-    dialog.remove();
-    createFloatingPopup(item);
-  });
-  dialog.querySelectorAll("[data-floating-popup-add]").forEach((button) => {
-    button.addEventListener("click", () => {
-      dialog.close();
-      dialog.remove();
-      addFloatingPopupItem(button.dataset.floatingPopupAdd, item);
-    });
-  });
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
 }
 
 function isSessionNotePictureInPictureOpen() {
   const active = getActiveLockIn();
-  return Boolean(active && isFloatingPopupItemPinned({ kind: "session-note", id: active.id }));
+  return Boolean(active && isPictureInPictureItemPinned({ kind: "session-note", id: active.id }));
 }
 
 function updateSessionNotePictureInPictureButton() {
   const button = document.getElementById("lockin-session-note-pip-btn");
   if (button) {
-    button.textContent = isSessionNotePictureInPictureOpen() ? "Choose popup" : "Pin note";
+    button.textContent = isSessionNotePictureInPictureOpen() ? "Unpin note" : "Pin note above windows";
   }
 }
 
 function preparePictureInPictureWindow(pipWindow) {
-  pipWindow.document.title = "Questify — Floating tools";
+  pipWindow.document.title = "Questify — Pinned tools";
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
   const styles = [...document.styleSheets].map((stylesheet) => {
     if (stylesheet.href && new URL(stylesheet.href, window.location.href).origin !== window.location.origin) {
@@ -4785,20 +4522,20 @@ function renderPictureInPictureContent() {
   const pipWindow = lockInPictureInPictureWindow;
   if (!pipWindow || pipWindow.closed) return;
   const active = getActiveLockIn();
-  const pinnedNote = isSessionNotePinnedInPictureInPicture
-    ? { kind: "session", id: active?.id }
-    : savedNotePictureInPictureNoteId
-      ? { kind: "saved", id: savedNotePictureInPictureNoteId }
-      : null;
-  const note = pinnedNote?.kind === "saved"
-    ? state.notes.find((item) => item.id === pinnedNote.id)
-    : null;
-  const hasTimer = isLockInTimerPinnedInPictureInPicture && active;
-  if (pinnedNote?.kind === "saved" && !note) {
-    savedNotePictureInPictureNoteId = null;
-    pinnedNote.kind = null;
+  const validItems = pictureInPictureItems.filter((item) =>
+    item.kind === "timer"
+      ? active?.id === item.id
+      : item.kind === "session-note"
+        ? active?.id === item.id
+        : state.notes.some((note) => note.id === item.id)
+  );
+  if (validItems.length !== pictureInPictureItems.length) {
+    pictureInPictureItems = validItems;
+    updatePictureInPicturePinButtons();
   }
-  const timerMarkup = hasTimer ? `
+  const hasTimer = pictureInPictureItems.some((item) => item.kind === "timer" && item.id === active?.id);
+  const noteItems = pictureInPictureItems.filter((item) => item.kind !== "timer");
+  const timerMarkup = hasTimer && active ? `
     <section class="lockin-pip" aria-label="Lock In timer">
       <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(active.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="timer">Unpin timer</button></header>
       <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
@@ -4806,50 +4543,57 @@ function renderPictureInPictureContent() {
       <div class="lockin-pip__actions"><button type="button" class="btn-secondary btn-sm" data-pip-pause>${active.isPaused ? "Resume" : "Pause"}</button><button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button></div>
     </section>
   ` : "";
-  let noteMarkup = "";
-  if (isSessionNotePinnedInPictureInPicture && active) {
-    const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
-    noteMarkup = `
+  const noteMarkup = noteItems.map((item) => {
+    if (item.kind === "session-note" && active) {
+      const color = /^#[0-9a-f]{6}$/i.test(active.sessionNoteColor || "") ? active.sessionNoteColor : "#fff1a8";
+      return `
       <section class="note-pip session-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-label="Lock In note">
-        <header><strong>Session note</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="note">Unpin note</button></header>
-        <label class="sr-only" for="session-note-pip-content">Focus note</label>
-        <textarea id="session-note-pip-content" maxlength="500" placeholder="Add a thought…">${escapeHTML(active.sessionNote || "")}</textarea>
+        <header><strong>Session note</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="session-note" data-pip-item-id="${escapeAttribute(item.id)}">Unpin note</button></header>
+        <label class="sr-only" for="session-note-pip-content-${escapeAttribute(item.id)}">Focus note</label>
+        <textarea id="session-note-pip-content-${escapeAttribute(item.id)}" data-pip-session-note="${escapeAttribute(item.id)}" maxlength="500" placeholder="Add a thought…">${escapeHTML(active.sessionNote || "")}</textarea>
         <div class="sticky-note-card__colors" role="group" aria-label="Note color">
           ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
-            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" data-pip-session-color="${escapeAttribute(item.id)}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
           `).join("")}
+          <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-pip-session-custom="${escapeAttribute(item.id)}" aria-label="Choose a custom session note color"></label>
         </div>
       </section>
     `;
-  } else if (note) {
+    }
+    const note = state.notes.find((savedNote) => savedNote.id === item.id);
+    if (!note) return "";
     const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
-    noteMarkup = `
-      <section class="note-pip saved-note-pip" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-label="Sticky note">
-        <header><input id="saved-note-pip-title" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title"><button type="button" class="btn-secondary btn-sm" data-pip-unpin="note">Unpin note</button></header>
-        <label class="sr-only" for="saved-note-pip-content">Note content</label>
-        <textarea id="saved-note-pip-content" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
+    return `
+      <section class="note-pip saved-note-pip" data-pip-saved-note="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}" aria-label="Sticky note">
+        <header><input id="saved-note-pip-title-${escapeAttribute(note.id)}" data-pip-saved-title="${escapeAttribute(note.id)}" type="text" maxlength="80" value="${escapeAttribute(note.title)}" aria-label="Note title"><button type="button" class="btn-secondary btn-sm" data-pip-unpin="saved-note" data-pip-item-id="${escapeAttribute(note.id)}">Unpin note</button></header>
+        <label class="sr-only" for="saved-note-pip-content-${escapeAttribute(note.id)}">Note content</label>
+        <textarea id="saved-note-pip-content-${escapeAttribute(note.id)}" data-pip-saved-content="${escapeAttribute(note.id)}" maxlength="2000" placeholder="Write a thought…">${escapeHTML(note.content)}</textarea>
         <div class="sticky-note-card__colors" role="group" aria-label="Note color">
           ${LOCKIN_NOTE_COLORS.map(({ value, label }) => `
-            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
+            <button type="button" class="lockin-note-swatch ${color === value ? "is-selected" : ""}" data-pip-note-color="${value}" data-pip-saved-color="${escapeAttribute(note.id)}" data-color="${value}" aria-label="${label}" aria-pressed="${color === value}" style="--swatch-color:${value}"></button>
           `).join("")}
+          <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-pip-saved-custom="${escapeAttribute(note.id)}" aria-label="Choose a custom sticky note color"></label>
         </div>
+        <small class="note-pip__updated" data-pip-saved-updated="${escapeAttribute(note.id)}">Updated ${escapeHTML(formatRelativeTime(note.updatedAt))}</small>
       </section>
     `;
-  }
+  }).join("");
   pipWindow.document.body.classList.toggle("has-pinned-timer", Boolean(hasTimer));
   pipWindow.document.body.classList.toggle("has-pinned-note", Boolean(noteMarkup));
+  pipWindow.document.body.style.setProperty("--pip-note-count", String(noteItems.length));
+  pipWindow.document.body.style.setProperty("--pip-item-count", String(pictureInPictureItems.length));
   pipWindow.document.body.innerHTML = `<main class="questify-pip-layout">${timerMarkup}${noteMarkup}</main>`;
-  attachPictureInPictureHandlers(pipWindow, pinnedNote);
+  pipWindow.document.title = "Questify — Pinned tools";
+  attachPictureInPictureHandlers(pipWindow);
   if (hasTimer) updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
+  resizePictureInPictureWindow();
 }
 
-function attachPictureInPictureHandlers(pipWindow, pinnedNote) {
+function attachPictureInPictureHandlers(pipWindow) {
   pipWindow.document.querySelectorAll("[data-pip-unpin]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (button.dataset.pipUnpin === "timer") closeLockInPictureInPicture();
-      else if (pinnedNote?.kind === "session") closeSessionNotePictureInPicture();
-      else closeSavedNotePictureInPicture();
+      removePictureInPictureItem(button.dataset.pipUnpin, button.dataset.pipItemId || getActiveLockIn()?.id);
     });
   });
   pipWindow.document.querySelector("[data-pip-pause]")?.addEventListener("click", () => {
@@ -4864,59 +4608,133 @@ function attachPictureInPictureHandlers(pipWindow, pinnedNote) {
     addLockInTime(current.id, 10);
     updateLockInTimerDisplay();
   });
-  const sessionNoteInput = pipWindow.document.getElementById("session-note-pip-content");
-  sessionNoteInput?.addEventListener("input", () => {
-    const current = getActiveLockIn();
-    if (!current) return;
-    current.sessionNote = sessionNoteInput.value.slice(0, 500);
-    saveState();
-    syncSessionNoteInput();
-  });
-  const savedNoteTitle = pipWindow.document.getElementById("saved-note-pip-title");
-  const savedNoteContent = pipWindow.document.getElementById("saved-note-pip-content");
-  if (savedNoteTitle || savedNoteContent) {
-    const noteId = savedNotePictureInPictureNoteId;
-    const updateNote = () => {
-      const current = state.notes.find((item) => item.id === noteId);
-      if (!current) {
-        closeSavedNotePictureInPicture();
-        return;
-      }
-      current.title = (savedNoteTitle?.value || "").slice(0, 80);
-      current.content = (savedNoteContent?.value || "").slice(0, 2000);
-      current.updatedAt = new Date().toISOString();
+  pipWindow.document.querySelectorAll("[data-pip-session-note]").forEach((sessionNoteInput) => {
+    sessionNoteInput.addEventListener("input", () => {
+      const current = getActiveLockIn();
+      if (!current || current.id !== sessionNoteInput.dataset.pipSessionNote) return;
+      current.sessionNote = sessionNoteInput.value.slice(0, 500);
       saveState();
-      syncStickyNotePopupEditor(current);
-    };
-    savedNoteTitle?.addEventListener("input", updateNote);
-    savedNoteContent?.addEventListener("input", updateNote);
-  }
-  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+      syncSessionNoteInput();
+    });
+  });
+  pipWindow.document.querySelectorAll("[data-pip-saved-title], [data-pip-saved-content]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const note = state.notes.find((item) => item.id === (input.dataset.pipSavedTitle || input.dataset.pipSavedContent));
+      if (!note) return;
+      if (input.hasAttribute("data-pip-saved-title")) note.title = input.value.slice(0, 80);
+      else note.content = input.value.slice(0, 2000);
+      note.updatedAt = new Date().toISOString();
+      saveState();
+      syncStickyNotePopupEditor(note);
+      syncAppFloatingWidgetNote();
+      const updated = pipWindow.document.querySelector(`[data-pip-saved-updated="${CSS.escape(note.id)}"]`);
+      if (updated) updated.textContent = "Updated just now";
+    });
+  });
+  pipWindow.document.querySelectorAll("[data-pip-session-color]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (pinnedNote?.kind === "session") updateLockInNoteColor(button.dataset.pipNoteColor);
-      else if (pinnedNote?.kind === "saved") updateStickyNoteColor(pinnedNote.id, button.dataset.pipNoteColor);
+      if (getActiveLockIn()?.id === button.dataset.pipSessionColor) {
+        updateLockInNoteColor(button.dataset.pipNoteColor);
+      }
+    });
+  });
+  pipWindow.document.querySelectorAll("[data-pip-saved-color]").forEach((button) => {
+    button.addEventListener("click", () => {
+      updateStickyNoteColor(button.dataset.pipSavedColor, button.dataset.color);
+    });
+  });
+  pipWindow.document.querySelectorAll("[data-pip-session-custom]").forEach((input) => {
+    input.addEventListener("input", () => {
+      if (getActiveLockIn()?.id === input.dataset.pipSessionCustom) {
+        updateLockInNoteColor(input.value);
+      }
+    });
+  });
+  pipWindow.document.querySelectorAll("[data-pip-saved-custom]").forEach((input) => {
+    input.addEventListener("input", () => {
+      updateStickyNoteColor(input.dataset.pipSavedCustom, input.value);
     });
   });
 }
 
-function closeSessionNotePictureInPicture() {
-  if (!isSessionNotePinnedInPictureInPicture) return;
-  isSessionNotePinnedInPictureInPicture = false;
-  const noteWidget = getFloatingWidget("note");
-  if (noteWidget?.mode === "pip" && noteWidget.kind === "session" && noteWidget.ownerId === appWindowId) {
-    setFloatingWidget("note", null);
+function resizePictureInPictureWindow() {
+  const pipWindow = lockInPictureInPictureWindow;
+  if (!pipWindow || pipWindow.closed) return;
+  const { width, height } = getPictureInPictureWindowSize(pictureInPictureItems);
+  if (pictureInPictureRequestedSize?.width === width &&
+      pictureInPictureRequestedSize?.height === height) return;
+  pictureInPictureRequestedSize = { width, height };
+  try {
+    pipWindow.resizeTo(width, height);
+  } catch (error) {
+    console.warn("The browser couldn't resize the Picture-in-Picture window:", error);
   }
+}
+
+function getPictureInPictureWindowSize(items) {
+  const noteCount = items.filter((item) => item.kind !== "timer").length;
+  const hasTimer = items.some((item) => item.kind === "timer");
+  const width = noteCount ? 460 : 380;
+  const height = Math.min(780, Math.max(220, (hasTimer ? 190 : 0) + noteCount * 370 + 24));
+  return { width, height };
+}
+
+function removePictureInPictureItem(kind, id = null) {
+  const previousLength = pictureInPictureItems.length;
+  pictureInPictureItems = pictureInPictureItems.filter((item) =>
+    item.kind !== kind || (id && item.id !== id)
+  );
+  if (pictureInPictureItems.length === previousLength) return;
   closePictureInPictureIfEmpty();
   renderPictureInPictureContent();
-  updateSessionNotePictureInPictureButton();
-  updateSavedNotePictureInPictureButton();
+  updatePictureInPicturePinButtons();
+}
+
+async function togglePictureInPictureItem(item) {
+  if (isMobileDevice()) {
+    showPictureInPictureDeviceMessage();
+    return;
+  }
+  if (!supportsDocumentPictureInPicture()) {
+    showToast("Picture-in-Picture isn't supported in this browser. You can still use the Questify window.");
+    return;
+  }
+  if (isPictureInPictureItemPinned(item)) {
+    removePictureInPictureItem(item.kind, item.id);
+    return;
+  }
+  try {
+    const pipWindow = await ensurePictureInPictureWindow(item);
+    if (pictureInPictureItems.some((pinnedItem) =>
+      pinnedItem.kind === item.kind && pinnedItem.id === item.id
+    )) return;
+    pictureInPictureItems.push(item);
+    renderPictureInPictureContent();
+    updatePictureInPicturePinButtons();
+    pipWindow.focus();
+    showToast(`${item.kind === "timer" ? "Timer" : "Note"} pinned above windows.`);
+  } catch (error) {
+    console.error("Could not pin a Questify tool in Picture-in-Picture:", error);
+    showToast("The browser couldn't open Picture-in-Picture. Try pinning again from Questify.");
+  }
+}
+
+function closeSessionNotePictureInPicture() {
+  removePictureInPictureItem("session-note");
 }
 
 function syncSessionNotePictureInPicture() {
   const pipWindow = lockInPictureInPictureWindow;
   if (!pipWindow || pipWindow.closed) return;
-  if (!isSessionNotePinnedInPictureInPicture) return;
   const active = getActiveLockIn();
+  const pinnedNotes = pictureInPictureItems.filter((item) => item.kind === "session-note");
+  if (pinnedNotes.some((item) => item.id !== active?.id)) {
+    pictureInPictureItems = pictureInPictureItems.filter((item) =>
+      item.kind !== "session-note" || item.id === active?.id
+    );
+    renderPictureInPictureContent();
+    updatePictureInPicturePinButtons();
+  }
   if (!active) {
     closeSessionNotePictureInPicture();
     return;
@@ -4926,20 +4744,20 @@ function syncSessionNotePictureInPicture() {
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   note?.style.setProperty("--lockin-note-color", color);
   note?.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
-  const input = pipWindow.document.getElementById("session-note-pip-content");
-  if (input && pipWindow.document.activeElement !== input) {
-    input.value = active.sessionNote || "";
-  }
-  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
+  const input = pipWindow.document.querySelector(`[data-pip-session-note="${CSS.escape(active.id)}"]`);
+  if (input && pipWindow.document.activeElement !== input) input.value = active.sessionNote || "";
+  pipWindow.document.querySelectorAll("[data-pip-session-color]").forEach((button) => {
     const selected = button.dataset.pipNoteColor === color;
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   });
+  const customColor = pipWindow.document.querySelector(`[data-pip-session-custom="${CSS.escape(active.id)}"]`);
+  if (customColor) customColor.value = color;
 }
 
 function toggleSessionNotePictureInPicture() {
   const active = getActiveLockIn();
-  if (active) showFloatingPopupChooser({ kind: "session-note", id: active.id });
+  if (active) togglePictureInPictureItem({ kind: "session-note", id: active.id });
 }
 
 function syncSessionNoteInput() {
@@ -4965,26 +4783,6 @@ function openLockInFocusWindow() {
   focusWindow.focus();
 }
 
-function openLockInTimerPopupFallback() {
-  if (lockInTimerPopupWindow && !lockInTimerPopupWindow.closed) {
-    lockInTimerPopupWindow.focus();
-    return true;
-  }
-  const timerUrl = new URL(window.location.href);
-  ["focus", "note", "timer", "session-note"].forEach((key) => timerUrl.searchParams.delete(key));
-  timerUrl.searchParams.set("timer", "lockin");
-  timerUrl.hash = "";
-  lockInTimerPopupWindow = window.open(
-    timerUrl.toString(),
-    "questify-lockin-timer",
-    "popup=yes,width=340,height=300,resizable=yes,scrollbars=no"
-  );
-  if (!lockInTimerPopupWindow) return false;
-  lockInTimerPopupWindow.focus();
-  updateLockInPictureInPictureButton();
-  return true;
-}
-
 function renderLockInFocusWindow() {
   const active = getActiveLockIn();
   return `
@@ -4993,7 +4791,7 @@ function renderLockInFocusWindow() {
         <div class="lockin-focus-window__brand">
           <div><p class="dashboard-section__eyebrow">FOCUS SPACE</p><h1 id="lockin-focus-window-title">${escapeHTML(active?.title || "Questify Lock In")}</h1></div>
         </div>
-        ${active ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary btn-sm" aria-label="Choose a popup for the timer">${isFloatingPopupItemPinned({ kind: "timer", id: active.id }) ? "Choose popup" : "Pin timer"}</button>` : ""}
+        ${active ? `<button type="button" id="lockin-picture-in-picture-btn" class="btn-secondary btn-sm" aria-label="Toggle timer Picture-in-Picture">${isPictureInPictureItemPinned({ kind: "timer", id: active.id }) ? "Unpin timer" : "Pin timer above windows"}</button>` : ""}
         <button type="button" id="lockin-focus-window-close" class="btn-secondary btn-sm">Close</button>
       </header>
       ${renderLockInPanel()}
@@ -5005,15 +4803,21 @@ function updateLockInPictureInPictureButton() {
   const button = document.getElementById("lockin-picture-in-picture-btn");
   if (button) {
     const active = getActiveLockIn();
-    button.textContent = active && isFloatingPopupItemPinned({ kind: "timer", id: active.id })
-      ? "Choose popup"
-      : "Pin timer";
+    button.textContent = active && isPictureInPictureItemPinned({ kind: "timer", id: active.id })
+      ? "Unpin timer"
+      : "Pin timer above windows";
   }
+}
+
+function updatePictureInPicturePinButtons() {
+  updateLockInPictureInPictureButton();
+  updateSessionNotePictureInPictureButton();
+  updateSavedNotePictureInPictureButton();
 }
 
 function updateLockInPictureInPicture(active, elapsedSec) {
   const pipWindow = lockInPictureInPictureWindow;
-  if (!pipWindow || pipWindow.closed || !isLockInTimerPinnedInPictureInPicture) return;
+  if (!pipWindow || pipWindow.closed || !isPictureInPictureItemPinned({ kind: "timer", id: active.id })) return;
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   const title = pipWindow.document.getElementById("lockin-pip-title");
@@ -5033,25 +4837,27 @@ function updateLockInPictureInPicture(active, elapsedSec) {
   if (pauseButton) pauseButton.textContent = active.isPaused ? "Resume" : "Pause";
 }
 
-async function ensurePictureInPictureWindow() {
+async function ensurePictureInPictureWindow(item) {
   if (lockInPictureInPictureWindow && !lockInPictureInPictureWindow.closed) return lockInPictureInPictureWindow;
   if (pictureInPictureRequest) return pictureInPictureRequest;
   pictureInPictureRequest = (async () => {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 360, height: 360 });
+    const existingWindow = window.documentPictureInPicture.window;
+    if (existingWindow && !existingWindow.closed) {
+      lockInPictureInPictureWindow = existingWindow;
+      pictureInPictureRequestedSize = null;
+      return existingWindow;
+    }
+    const { width, height } = getPictureInPictureWindowSize([item]);
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width, height });
     lockInPictureInPictureWindow = pipWindow;
+    pictureInPictureRequestedSize = { width, height };
     preparePictureInPictureWindow(pipWindow);
     pipWindow.addEventListener("pagehide", () => {
       if (lockInPictureInPictureWindow !== pipWindow) return;
       lockInPictureInPictureWindow = null;
-      isLockInTimerPinnedInPictureInPicture = false;
-      isSessionNotePinnedInPictureInPicture = false;
-      savedNotePictureInPictureNoteId = null;
-      if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
-      const noteWidget = getFloatingWidget("note");
-      if (noteWidget?.mode === "pip" && noteWidget.ownerId === appWindowId) setFloatingWidget("note", null);
-      updateLockInPictureInPictureButton();
-      updateSessionNotePictureInPictureButton();
-      updateSavedNotePictureInPictureButton();
+      pictureInPictureRequestedSize = null;
+      pictureInPictureItems = [];
+      updatePictureInPicturePinButtons();
     }, { once: true });
     return pipWindow;
   })();
@@ -5063,21 +4869,16 @@ async function ensurePictureInPictureWindow() {
 }
 
 function closePictureInPictureIfEmpty() {
-  if (isLockInTimerPinnedInPictureInPicture ||
-      isSessionNotePinnedInPictureInPicture ||
-      savedNotePictureInPictureNoteId) return;
+  if (pictureInPictureItems.length) return;
   const pipWindow = lockInPictureInPictureWindow;
   lockInPictureInPictureWindow = null;
+  pictureInPictureRequestedSize = null;
   if (pipWindow && !pipWindow.closed) pipWindow.close();
-  updateLockInPictureInPictureButton();
+  updatePictureInPicturePinButtons();
 }
 
 function closeLockInPictureInPicture() {
-  isLockInTimerPinnedInPictureInPicture = false;
-  if (ownsFloatingWidget("timer", "pip")) setFloatingWidget("timer", null);
-  closePictureInPictureIfEmpty();
-  renderPictureInPictureContent();
-  updateLockInPictureInPictureButton();
+  removePictureInPictureItem("timer");
 }
 
 function openLockInPictureInPicture() {
@@ -5086,7 +4887,7 @@ function openLockInPictureInPicture() {
     showToast("Start a Lock In session before pinning its timer.");
     return;
   }
-  showFloatingPopupChooser({ kind: "timer", id: active.id });
+  togglePictureInPictureItem({ kind: "timer", id: active.id });
 }
 
 function renderLockInTimerPopup() {
@@ -5127,7 +4928,7 @@ function renderLockInPanel() {
               ? `<button type="button" class="btn-secondary btn-sm lockin-open-window-btn">Open focus window ↗</button>`
               : ""}
             ${!isLockInFocusWindow && !isLockInTimerWindow
-              ? `<button type="button" class="btn-secondary btn-sm" id="lockin-picture-in-picture-btn" aria-label="Choose a popup for the timer">${isFloatingPopupItemPinned({ kind: "timer", id: active.id }) ? "Choose popup" : "Pin timer"}</button>`
+              ? `<button type="button" class="btn-secondary btn-sm" id="lockin-picture-in-picture-btn" aria-label="Toggle timer Picture-in-Picture">${isPictureInPictureItemPinned({ kind: "timer", id: active.id }) ? "Unpin timer" : "Pin timer above windows"}</button>`
               : ""}
           </div>
         </div>
@@ -5318,7 +5119,9 @@ function renderChallengeCard(challenge) {
               }</span>`
             : ""
         }
-        ${!challenge.completed && !challenge.isLockIn ? `<span class="challenge-card__date">📅 ${dateLabel}</span>` : ""}
+        ${!challenge.completed && !challenge.isLockIn ? `
+            <span class="challenge-card__date">📅 ${dateLabel}</span>
+          ` : ""}
       </div>
       <div class="challenge-card__actions">
         ${actionsHTML}
@@ -5378,7 +5181,7 @@ const TOUR_STEPS = [
     section: "Sticky Notes",
     selector: ".sticky-notes-heading",
     title: "Keep ideas close",
-    body: "Choose a separate popup for a saved note or add it to an existing floating window. Use Picture-in-Picture when supported; regular popups may not stay on top.",
+    body: "Pin saved notes into the same Picture-in-Picture window as your timer. Each pinned item can be removed independently.",
   },
   {
     view: "badges",
@@ -5546,7 +5349,7 @@ function renderStickyNotesPage() {
         <div>
           <p class="dashboard-section__eyebrow">YOUR THOUGHTS, IN ONE PLACE</p>
           <h1 id="sticky-notes-title">Sticky Notes</h1>
-          <p class="text-muted">Choose a separate popup for a note or add it to one you already have open. Always-on-top support varies by browser.</p>
+          <p class="text-muted">Pin notes into the same always-on-top window as your timer. Each note can be pinned or unpinned independently; support varies by browser.</p>
         </div>
         <button type="button" class="btn" id="create-sticky-note">＋ New note</button>
       </header>
@@ -5576,13 +5379,14 @@ function renderStickyNotePopup() {
     `;
   }
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+  const isPinnedAboveWindows = isPictureInPictureItemPinned({ kind: "saved-note", id: note.id });
   return `
     <section class="sticky-note-window" aria-label="Sticky note window">
       <article class="sticky-note-card sticky-note-card--window" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
         <div class="sticky-note-card__header">
           <span class="sticky-note-card__pin-indicator">Sticky note</span>
           <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
-          <button type="button" class="btn-secondary btn-sm" id="saved-note-pip-btn">${isFloatingPopupItemPinned({ kind: "saved-note", id: note.id }) ? "Choose popup" : "Pin note"}</button>
+          <button type="button" class="btn-secondary btn-sm" id="saved-note-pip-btn">${isPinnedAboveWindows ? "Unpin note" : "Pin note above windows"}</button>
           <button type="button" class="btn-secondary btn-sm" data-note-window-close aria-label="Close sticky note">×</button>
         </div>
         <label class="sr-only" for="note-window-title">Note title</label>
@@ -5603,64 +5407,61 @@ function renderStickyNotePopup() {
   `;
 }
 
-function isSavedNotePictureInPictureOpen() {
-  return getFloatingPopupGroups().some((group) =>
-    group.items.some((item) => item.kind === "saved-note")
-  );
-}
-
 function updateSavedNotePictureInPictureButton() {
   const button = document.getElementById("saved-note-pip-btn");
-  if (button) button.textContent = isFloatingPopupItemPinned({ kind: "saved-note", id: stickyNoteWindowId })
-    ? "Choose popup"
-    : "Pin note";
+  if (button) button.textContent = isPictureInPictureItemPinned({ kind: "saved-note", id: stickyNoteWindowId })
+    ? "Unpin note"
+    : "Pin note above windows";
   document.querySelectorAll("[data-note-pip]").forEach((noteButton) => {
-    noteButton.textContent = isFloatingPopupItemPinned({ kind: "saved-note", id: noteButton.dataset.notePip })
-      ? "Choose popup"
-      : "Pin note";
+    noteButton.textContent = isPictureInPictureItemPinned({ kind: "saved-note", id: noteButton.dataset.notePip })
+      ? "Unpin note"
+      : "Pin above windows";
   });
 }
 
-function closeSavedNotePictureInPicture() {
-  if (!savedNotePictureInPictureNoteId) return;
-  savedNotePictureInPictureNoteId = null;
-  const noteWidget = getFloatingWidget("note");
-  if (noteWidget?.mode === "pip" && noteWidget.kind === "saved" && noteWidget.ownerId === appWindowId) {
-    setFloatingWidget("note", null);
-  }
-  closePictureInPictureIfEmpty();
-  renderPictureInPictureContent();
-  updateSavedNotePictureInPictureButton();
-  updateSessionNotePictureInPictureButton();
+function closeSavedNotePictureInPicture(noteId = null) {
+  if (noteId) removePictureInPictureItem("saved-note", noteId);
+  else removePictureInPictureItem("saved-note");
 }
 
 function syncSavedNotePictureInPicture() {
   const pipWindow = lockInPictureInPictureWindow;
-  if (!pipWindow || pipWindow.closed || !savedNotePictureInPictureNoteId) return;
-  const note = state.notes.find((item) => item.id === savedNotePictureInPictureNoteId);
-  if (!note) {
-    closeSavedNotePictureInPicture();
-    return;
+  if (!pipWindow || pipWindow.closed) return;
+  const pinnedNotes = pictureInPictureItems.filter((item) => item.kind === "saved-note");
+  const availableIds = new Set(state.notes.map((note) => note.id));
+  if (pinnedNotes.some((item) => !availableIds.has(item.id))) {
+    pictureInPictureItems = pictureInPictureItems.filter((item) =>
+      item.kind !== "saved-note" || availableIds.has(item.id)
+    );
+    if (!pictureInPictureItems.length) closePictureInPictureIfEmpty();
+    renderPictureInPictureContent();
   }
-  const card = pipWindow.document.querySelector(".note-pip");
-  const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
-  if (card) {
-    card.style.setProperty("--lockin-note-color", color);
-    card.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+  if (!pictureInPictureItems.some((item) => item.kind === "saved-note")) {
+    return;
   }
   pipWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme;
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
-  const title = pipWindow.document.getElementById("saved-note-pip-title");
-  if (title && pipWindow.document.activeElement !== title) title.value = note.title;
-  const content = pipWindow.document.getElementById("saved-note-pip-content");
-  if (content && pipWindow.document.activeElement !== content) content.value = note.content;
-  pipWindow.document.querySelectorAll("[data-pip-note-color]").forEach((button) => {
-    const selected = button.dataset.pipNoteColor === color;
-    button.classList.toggle("is-selected", selected);
-    button.setAttribute("aria-pressed", String(selected));
+  pinnedNotes.forEach((item) => {
+    const note = state.notes.find((savedNote) => savedNote.id === item.id);
+    if (!note) return;
+    const card = pipWindow.document.querySelector(`[data-pip-saved-note="${CSS.escape(note.id)}"]`);
+    const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
+    card?.style.setProperty("--lockin-note-color", color);
+    card?.style.setProperty("--lockin-note-ink", getLockInNoteInk(color));
+    const title = pipWindow.document.querySelector(`[data-pip-saved-title="${CSS.escape(note.id)}"]`);
+    if (title && pipWindow.document.activeElement !== title) title.value = note.title;
+    const content = pipWindow.document.querySelector(`[data-pip-saved-content="${CSS.escape(note.id)}"]`);
+    if (content && pipWindow.document.activeElement !== content) content.value = note.content;
+    const updated = pipWindow.document.querySelector(`[data-pip-saved-updated="${CSS.escape(note.id)}"]`);
+    if (updated) updated.textContent = `Updated ${formatRelativeTime(note.updatedAt)}`;
+    card?.querySelectorAll("[data-pip-saved-color]").forEach((button) => {
+      const selected = button.dataset.color === color;
+      button.classList.toggle("is-selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    const customColor = card?.querySelector(`[data-pip-saved-custom="${CSS.escape(note.id)}"]`);
+    if (customColor) customColor.value = color;
   });
-  const updated = pipWindow.document.getElementById("saved-note-pip-updated");
-  if (updated) updated.textContent = formatRelativeTime(note.updatedAt);
 }
 
 function syncStickyNotePopupEditor(note) {
@@ -5684,7 +5485,7 @@ function toggleSavedNotePictureInPicture(noteId = stickyNoteWindowId) {
     showToast("This sticky note could not be found.");
     return;
   }
-  showFloatingPopupChooser({ kind: "saved-note", id: note.id });
+  togglePictureInPictureItem({ kind: "saved-note", id: note.id });
 }
 
 function renderFloatingPopupItem(item) {
@@ -6109,15 +5910,15 @@ function renderStickyNoteCard(note) {
   const color = /^#[0-9a-f]{6}$/i.test(note.color || "") ? note.color : "#fff1a8";
   const confirmingDelete = confirmingNoteDeleteId === note.id;
   const pinnedNote = getFloatingWidget("note");
-  const isPinned = pinnedNote?.mode === "app" &&
+  const isPinnedInQuestify = pinnedNote?.mode === "app" &&
     pinnedNote.kind === "saved" &&
     pinnedNote.id === note.id &&
     pinnedNote.ownerId === appWindowId;
-  const isPinnedAboveWindows = isFloatingPopupItemPinned({ kind: "saved-note", id: note.id });
+  const isPinnedAboveWindows = isPictureInPictureItemPinned({ kind: "saved-note", id: note.id });
   return `
-    <article class="sticky-note-card ${isPinned ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
+    <article class="sticky-note-card ${isPinnedInQuestify || isPinnedAboveWindows ? "is-pinned" : ""}" data-note-card="${escapeAttribute(note.id)}" style="--lockin-note-color:${color};--lockin-note-ink:${getLockInNoteInk(color)}">
       <div class="sticky-note-card__header">
-        <span class="sticky-note-card__pin-indicator">${isPinned ? "Pinned on screen" : "Sticky note"}</span>
+        <span class="sticky-note-card__pin-indicator">${isPinnedAboveWindows ? "Pinned above windows" : isPinnedInQuestify ? "Pinned in Questify" : "Sticky note"}</span>
         <span class="sticky-note-card__updated">${escapeHTML(formatRelativeTime(note.updatedAt))}</span>
       </div>
       <label class="sr-only" for="note-title-${escapeAttribute(note.id)}">Note title</label>
@@ -6131,8 +5932,8 @@ function renderStickyNoteCard(note) {
         <label class="lockin-sticky-note__custom">Custom<input type="color" value="${color}" data-note-custom-color="${escapeAttribute(note.id)}" aria-label="Choose a custom note color"></label>
       </div>
       <div class="sticky-note-card__actions">
-        <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinned ? "Unpin in Questify" : "Pin in Questify"}</button>
-        <button type="button" class="btn-secondary btn-sm" data-note-pip="${escapeAttribute(note.id)}">${isPinnedAboveWindows ? "Choose popup" : "Pin note"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-pin-app="${escapeAttribute(note.id)}">${isPinnedInQuestify ? "Unpin in Questify" : "Pin in Questify"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-note-pip="${escapeAttribute(note.id)}">${isPinnedAboveWindows ? "Unpin note" : "Pin above windows"}</button>
         ${confirmingDelete
           ? `<span class="sticky-note-card__confirm">Delete this note?</span>
              <button type="button" class="btn-delete btn-sm" data-note-delete-confirm="${escapeAttribute(note.id)}">Delete</button>
@@ -6200,7 +6001,7 @@ function attachStickyNotesHandlers() {
       const id = button.dataset.noteDeleteConfirm;
       state.notes = state.notes.filter((note) => note.id !== id);
       removeItemFromAllFloatingPopups({ kind: "saved-note", id });
-      if (savedNotePictureInPictureNoteId === id) closeSavedNotePictureInPicture();
+      closeSavedNotePictureInPicture(id);
       if (getFloatingWidget("note")?.id === id) setFloatingWidget("note", null);
       confirmingNoteDeleteId = null;
       saveState();
@@ -6623,7 +6424,7 @@ const views = {
       <div>
         <p class="dashboard-section__eyebrow">YOUR HABIT HISTORY</p>
         <h2>Calendar</h2>
-        <p class="text-muted">Review daily check-ins, challenge wins, XP, and consistency over time.</p>
+        <p class="text-muted">Review your daily habit completion and consistency over time.</p>
       </div>
       <div class="calendar-mode-switch" role="group" aria-label="Calendar view">
         ${[["month", "Month"], ["week", "Week"], ["day", "Day"]].map(([mode, label]) => `
@@ -6638,8 +6439,6 @@ const views = {
       ? renderWeeklyView()
       : ""}
     ${renderCalendarDayDetails(calendarSelectedDate)}
-    ${renderTodayHabitsCard()}
-    ${renderWeeklyWinsCard()}
   `,
   habits: () => renderHabitTracker(),
   badges: () => {
@@ -6794,10 +6593,10 @@ const views = {
     <section class="settings-section card" aria-labelledby="data-backup-title">
       <div class="settings-card-heading">
         <h3 id="data-backup-title">Import &amp; export data</h3>
-        <p class="text-muted">Export on this device, then import that file on another device to move your data across. Importing replaces the data on that device.</p>
+        <p class="text-muted">Export all your Questify progress to a JSON file for safekeeping or transfer. Importing a file replaces the data on this device.</p>
       </div>
       <div class="settings-row settings-data-actions">
-        <button type="button" class="btn-secondary btn-sm" id="export-data-btn">Export data</button>
+        <button type="button" class="btn btn-sm" id="export-data-btn"><span aria-hidden="true">↓</span> Export all data</button>
         <button type="button" class="btn-secondary btn-sm" id="import-data-btn">Import data</button>
         <input type="file" id="import-data-file" accept=".json,application/json" hidden>
       </div>
@@ -6947,7 +6746,7 @@ const views = {
       <section class="settings-section card" aria-labelledby="floating-window-settings-title">
         <div class="settings-card-heading">
           <h3 id="floating-window-settings-title">Floating windows</h3>
-          <p class="text-muted">Pin the timer and notes in compact browser Picture-in-Picture windows. Browser support controls their always-on-top behavior.</p>
+          <p class="text-muted">Pin timers and notes directly into one compact Picture-in-Picture window. Each item can be pinned or unpinned independently; browser support controls always-on-top behavior.</p>
         </div>
         <div class="settings-row">
           <div>
@@ -7215,10 +7014,14 @@ function attachHabitHandlers() {
       event.preventDefault();
       const input = document.getElementById("add-habit-input");
       const descriptionInput = document.getElementById("add-habit-description");
-      const difficultyInput = document.getElementById("add-habit-difficulty");
-      const categoryInput = document.getElementById("add-habit-category");
       const error = document.getElementById("add-habit-error");
-      const result = addHabit(input.value, descriptionInput.value, difficultyInput.value, categoryInput.value);
+      const formData = new FormData(form);
+      const result = addHabit(
+        input.value,
+        descriptionInput.value,
+        String(formData.get("difficulty") || "medium"),
+        String(formData.get("category") || "general")
+      );
       if (!result.ok) {
         error.textContent = result.error;
         input.classList.add("input-error");
@@ -7274,6 +7077,8 @@ function attachCalendarHandlers() {
   document.querySelectorAll("[data-calendar-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       calendarViewMode = button.dataset.calendarMode;
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
+      weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   });
@@ -7292,6 +7097,7 @@ function attachCalendarHandlers() {
     button.addEventListener("click", () => {
       calendarSelectedDate = addDaysToDateString(calendarSelectedDate, Number(button.dataset.calendarDayOffset));
       calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
+      weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   });
@@ -7304,6 +7110,7 @@ function attachCalendarHandlers() {
       const day = Math.min(selected.getDate(), new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate());
       calendarViewDate = target;
       calendarSelectedDate = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   }
@@ -7316,6 +7123,7 @@ function attachCalendarHandlers() {
       const day = Math.min(selected.getDate(), new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate());
       calendarViewDate = target;
       calendarSelectedDate = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   }
@@ -7323,6 +7131,8 @@ function attachCalendarHandlers() {
   document.querySelectorAll(".calendar-day[data-calendar-date]").forEach((dayButton) => {
     dayButton.addEventListener("click", () => {
       calendarSelectedDate = dayButton.dataset.calendarDate;
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
+      weekViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   });
@@ -7332,6 +7142,7 @@ function attachCalendarHandlers() {
     weekPrevBtn.addEventListener("click", () => {
       weekViewDate.setDate(weekViewDate.getDate() - 7);
       calendarSelectedDate = addDaysToDateString(calendarSelectedDate, -7);
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   }
@@ -7341,14 +7152,15 @@ function attachCalendarHandlers() {
     weekNextBtn.addEventListener("click", () => {
       weekViewDate.setDate(weekViewDate.getDate() + 7);
       calendarSelectedDate = addDaysToDateString(calendarSelectedDate, 7);
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   }
 
   const weekGrid = document.getElementById("week-grid");
   if (weekGrid) {
-    weekGrid.addEventListener("click", (e) => {
-      const chip = e.target.closest(".week-chip.is-active");
+    weekGrid.addEventListener("click", (event) => {
+      const chip = event.target.closest(".week-chip.is-active");
       if (chip) {
         const id = chip.dataset.id;
         if (!id) return;
@@ -7357,9 +7169,10 @@ function attachCalendarHandlers() {
         return;
       }
 
-      const dayCard = e.target.closest(".week-day-card");
+      const dayCard = event.target.closest(".week-day-card");
       if (dayCard) {
         calendarSelectedDate = dayCard.dataset.date;
+        calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
         renderView();
       }
     });
@@ -7370,14 +7183,15 @@ function attachCalendarHandlers() {
       if (!dayCard) return;
       event.preventDefault();
       calendarSelectedDate = dayCard.dataset.date;
+      calendarViewDate = new Date(`${calendarSelectedDate}T00:00:00`);
       renderView();
     });
   }
 
   const dayDetailOverlay = document.getElementById("day-detail-overlay");
   if (dayDetailOverlay) {
-    dayDetailOverlay.addEventListener("click", (e) => {
-      if (e.target.id === "day-detail-overlay") {
+    dayDetailOverlay.addEventListener("click", (event) => {
+      if (event.target.id === "day-detail-overlay") {
         dayDetailDate = null;
         renderView();
       }
@@ -7391,7 +7205,6 @@ function attachCalendarHandlers() {
       renderView();
     });
   }
-
 }
 
 // -------------------------------------
@@ -7621,7 +7434,14 @@ function attachChallengesHandlers() {
       const recurrence = recurrenceSelect ? recurrenceSelect.value : "none";
       const dateInput = document.getElementById("add-challenge-date");
       const scheduledDate = dateInput && dateInput.value ? dateInput.value : getTodayDateString();
-      addChallenge(result.value, difficulty, scheduledDate, category, recurrence);
+      if (!isValidDateString(scheduledDate)) {
+        errorEl.textContent = "Choose a valid date for this challenge.";
+        dateInput?.focus();
+        return;
+      }
+
+      const added = addChallenge(result.value, difficulty, scheduledDate, category, recurrence);
+      if (!added) return;
       renderView();
     });
 
@@ -8896,9 +8716,6 @@ function navigateTo(viewName, pushToHistory = true) {
   isConfirmingLogout = false;
   dayDetailDate = null;
   if (destination === "calendar" || destination === "habits") {
-    calendarViewDate = new Date(); // always open Calendar on the current month
-    weekViewDate = new Date(); // and the current week
-    calendarSelectedDate = getTodayDateString();
     dayDetailDate = null;
     editingHabitId = null;
     confirmingHabitDeleteId = null;
