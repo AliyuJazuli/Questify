@@ -1229,15 +1229,24 @@ function getHabitCompletionRate(habits, startDate, endDate) {
   return { expected, completed, percent: expected ? Math.round((completed / expected) * 100) : 0 };
 }
 
-function getHabitOverallCompletionRate(habits = getActiveHabits()) {
-  const today = getTodayDateString();
-  const firstHabitDate = habits
-    .map((habit) => habit.createdDate || (habit.createdAt || "").slice(0, 10))
-    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
-    .sort()[0];
-  return firstHabitDate
-    ? getHabitCompletionRate(habits, firstHabitDate, today).percent
-    : 0;
+function getFixedHabitPeriodCompletionRate(habits, startDate, endDate) {
+  let periodDays = 0;
+  for (let cursor = startDate; cursor <= endDate; cursor = addDaysToDateString(cursor, 1)) {
+    periodDays += 1;
+  }
+
+  const expected = habits.length * periodDays;
+  let completed = 0;
+  const completedThrough = endDate > getTodayDateString() ? getTodayDateString() : endDate;
+  if (completedThrough >= startDate) {
+    habits.forEach((habit) => {
+      for (let cursor = startDate; cursor <= completedThrough; cursor = addDaysToDateString(cursor, 1)) {
+        if (Array.isArray(habit.completedDates) && habit.completedDates.includes(cursor)) completed += 1;
+      }
+    });
+  }
+
+  return { expected, completed, percent: expected ? Math.round((completed / expected) * 100) : 0 };
 }
 
 function getHabitAnalytics(period = "week") {
@@ -1253,9 +1262,20 @@ function getHabitAnalytics(period = "week") {
   } else if (period === "month") {
     startDate = `${today.slice(0, 8)}01`;
     endDate = `${today.slice(0, 7)}-${String(new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
+  } else if (period === "year") {
+    startDate = `${todayDate.getFullYear()}-01-01`;
+    endDate = `${todayDate.getFullYear()}-12-31`;
   }
 
-  const rate = getHabitCompletionRate(activeHabits, startDate, endDate);
+  const rate = period === "day"
+    ? getHabitCompletionRate(activeHabits, startDate, endDate)
+    : getFixedHabitPeriodCompletionRate(activeHabits, startDate, endDate);
+  if (period === "year" && rate.expected > 0) {
+    const annualPercent = (rate.completed / rate.expected) * 100;
+    rate.percent = annualPercent > 0 && annualPercent < 1
+      ? Math.round(annualPercent * 10) / 10
+      : Math.round(annualPercent);
+  }
   const completedHabits = activeHabits.filter((habit) =>
     (habit.completedDates || []).some((date) => date >= startDate && date <= today)
   );
@@ -1268,7 +1288,9 @@ function getHabitAnalytics(period = "week") {
     return false;
   });
   const consistency = activeHabits.map((habit) => {
-    const habitRate = getHabitCompletionRate([habit], startDate, endDate);
+    const habitRate = period === "day"
+      ? getHabitCompletionRate([habit], startDate, endDate)
+      : getFixedHabitPeriodCompletionRate([habit], startDate, endDate);
     return { habit, ...habitRate, ...getHabitStreakStats(habit, today) };
   }).sort((a, b) => b.percent - a.percent || b.current - a.current);
 
@@ -1276,12 +1298,17 @@ function getHabitAnalytics(period = "week") {
     ? 1
     : period === "week"
     ? 7
-    : new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate();
+    : period === "month"
+    ? new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate()
+    : 0;
+  const pointsStartDate = period === "week" ? addDaysToDateString(today, -6) : startDate;
   const dailyPoints = Array.from({ length: pointCount }, (_, index) => {
     const date = period === "day"
       ? today
-      : addDaysToDateString(startDate, index);
-    const dayRate = getHabitCompletionRate(activeHabits, date, date);
+      : addDaysToDateString(pointsStartDate, index);
+    const dayRate = date > today
+      ? { expected: activeHabits.length, completed: 0, percent: 0 }
+      : getFixedHabitPeriodCompletionRate(activeHabits, date, date);
     const dayDate = new Date(`${date}T00:00:00`);
     return {
       date,
@@ -1298,19 +1325,38 @@ function getHabitAnalytics(period = "week") {
         day: "numeric",
         year: "numeric",
       }).format(dayDate),
-      percent: dayRate.expected ? dayRate.percent : null,
+      percent: date > today ? null : dayRate.expected ? dayRate.percent : null,
       completed: dayRate.completed,
       expected: dayRate.expected,
       isFuture: date > today,
     };
   });
+  const yearlyMonths = period === "year"
+    ? Array.from({ length: 12 }, (_, monthIndex) => {
+        const monthStartDate = new Date(todayDate.getFullYear(), monthIndex, 1);
+        const monthStart = `${todayDate.getFullYear()}-${String(monthIndex + 1).padStart(2, "0")}-01`;
+        const monthEnd = `${todayDate.getFullYear()}-${String(monthIndex + 1).padStart(2, "0")}-${String(new Date(todayDate.getFullYear(), monthIndex + 1, 0).getDate()).padStart(2, "0")}`;
+        const isFuture = monthStart > today;
+        const monthRate = isFuture
+          ? { expected: 0, completed: 0, percent: 0 }
+          : getFixedHabitPeriodCompletionRate(activeHabits, monthStart, monthEnd);
+        return {
+          label: new Intl.DateTimeFormat(undefined, { month: "long" }).format(monthStartDate),
+          shortLabel: new Intl.DateTimeFormat(undefined, { month: "short" }).format(monthStartDate),
+          percent: isFuture || !monthRate.expected ? null : monthRate.percent,
+          isCurrent: monthStart.slice(0, 7) === today.slice(0, 7),
+          isFuture,
+        };
+      })
+    : [];
 
   const todayCompleted = getHabitCompletionsForDate(today);
-  const currentMonthRate = getHabitCompletionRate(activeHabits, startDate, today);
+  const currentMonthStart = `${today.slice(0, 8)}01`;
+  const currentMonthRate = getFixedHabitPeriodCompletionRate(activeHabits, currentMonthStart, today);
   const priorMonthStart = `${new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1).getFullYear()}-${String(new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1).getMonth() + 1).padStart(2, "0")}-01`;
   const priorMonthEndDay = Math.min(todayDate.getDate(), new Date(todayDate.getFullYear(), todayDate.getMonth(), 0).getDate());
   const priorMonthEnd = `${priorMonthStart.slice(0, 7)}-${String(priorMonthEndDay).padStart(2, "0")}`;
-  const priorMonthRate = getHabitCompletionRate(activeHabits, priorMonthStart, priorMonthEnd);
+  const priorMonthRate = getFixedHabitPeriodCompletionRate(activeHabits, priorMonthStart, priorMonthEnd);
   const overallStreak = getOverallHabitStreakStats(state, today);
   let bestPerformingDay = null;
   if (period === "month") {
@@ -1319,7 +1365,7 @@ function getHabitAnalytics(period = "week") {
       let expected = 0;
       for (let cursor = startDate; cursor <= today; cursor = addDaysToDateString(cursor, 1)) {
         if (new Date(`${cursor}T00:00:00`).getDay() !== weekday) continue;
-        const dayRate = getHabitCompletionRate(activeHabits, cursor, cursor);
+        const dayRate = getFixedHabitPeriodCompletionRate(activeHabits, cursor, cursor);
         completed += dayRate.completed;
         expected += dayRate.expected;
       }
@@ -1341,13 +1387,13 @@ function getHabitAnalytics(period = "week") {
     hasData: rate.expected > 0,
     activeCount: activeHabits.length,
     totalCount: (state.habits || []).length,
-    overallPercent: getHabitOverallCompletionRate(activeHabits),
     completedHabitCount: completedHabits.length,
     todayCompleted: todayCompleted.length,
     todayRemaining: Math.max(0, activeHabits.length - todayCompleted.length),
     currentStreak: overallStreak.current,
     bestStreak: overallStreak.longest,
     dailyPoints,
+    yearlyMonths,
     consistentHabits: consistency.slice(0, 3),
     missedHabits,
     monthlyDelta: priorMonthRate.expected
@@ -1559,6 +1605,9 @@ function finishLockIn(id) {
   const challenge = state.challenges.find((c) => c.id === id);
   if (!challenge || challenge.completed) return;
 
+  const keepPinnedTimer = pictureInPictureItems.some((item) =>
+    item.kind === "timer" && item.id === id
+  );
   const elapsedSec = getLockInElapsedSeconds(challenge);
   challenge.actualMinutes = Math.max(1, Math.round(elapsedSec / 60));
   challenge.xpValue = computeLockInXp(challenge.targetMinutes, challenge.actualMinutes, challenge.difficulty);
@@ -1569,12 +1618,13 @@ function finishLockIn(id) {
   stopLockInTicker();
   removeItemFromAllFloatingPopups({ kind: "timer", id });
   removeItemFromAllFloatingPopups({ kind: "session-note", id });
-  closeLockInPictureInPicture();
+  if (!keepPinnedTimer) closeLockInPictureInPicture();
   if (getFloatingWidget("timer")?.id === id) setFloatingWidget("timer", null);
   closeSessionNotePictureInPicture();
   if (getFloatingWidget("note")?.kind === "session" && getFloatingWidget("note")?.id === id) {
     setFloatingWidget("note", null);
   }
+  if (keepPinnedTimer) renderPictureInPictureContent();
 }
 
 function cancelLockIn(id) {
@@ -1618,6 +1668,15 @@ function updateLockInTimerDisplay() {
   const targetSec = active.targetMinutes * 60;
   const overBy = elapsedSec - targetSec;
   const remainingSec = Math.max(0, targetSec - elapsedSec);
+  if (
+    !active.isPaused &&
+    remainingSec === 0 &&
+    isPictureInPictureItemPinned({ kind: "timer", id: active.id })
+  ) {
+    finishLockIn(active.id);
+    renderView();
+    return;
+  }
   const circumference = 2 * Math.PI * 48;
   const projectedXp = computeLockInXp(active.targetMinutes, Math.max(1, Math.round(elapsedSec / 60)), active.difficulty);
   const progressPercent = Math.min(100, (elapsedSec / targetSec) * 100);
@@ -2722,11 +2781,38 @@ function initNotifBell() {
   if (!bellBtn || !panel || !clearBtn || !listEl) return;
   attachedHandlers.notifBell = true;
 
+  document.body.appendChild(panel);
+
+  const positionPanel = () => {
+    if (panel.classList.contains("is-hidden")) return;
+
+    const bellRect = bellBtn.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const margin = 12;
+    const left = Math.max(
+      margin,
+      Math.min(bellRect.right - panelRect.width, window.innerWidth - panelRect.width - margin)
+    );
+    const below = bellRect.bottom + 8;
+    const top = below + panelRect.height <= window.innerHeight - margin
+      ? below
+      : Math.max(margin, bellRect.top - panelRect.height - 8);
+
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+  };
+
   bellBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const isNowHidden = panel.classList.toggle("is-hidden");
     bellBtn.setAttribute("aria-expanded", String(!isNowHidden));
+    if (!isNowHidden) positionPanel();
   });
+
+  window.addEventListener("resize", positionPanel);
+  window.addEventListener("scroll", positionPanel, true);
 
   clearBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -2974,35 +3060,6 @@ function setDailyGoal(goal) {
 }
 
 // -------------------------------------
-// This week vs last week: completed-challenge comparison
-// -------------------------------------
-function getWeekComparison(s = state) {
-  const { startOfWeek: thisWeekStart, endOfWeek: thisWeekEnd } = getCurrentWeekBounds();
-  const lastWeekStart = new Date(thisWeekStart);
-  lastWeekStart.setDate(lastWeekStart.getDate() - 7);
-  const lastWeekEnd = new Date(thisWeekEnd);
-  lastWeekEnd.setDate(lastWeekEnd.getDate() - 7);
-
-  let thisWeekCount = 0;
-  let lastWeekCount = 0;
-
-  getCompletedChallenges(s).forEach((c) => {
-    const d = new Date(c.dateCompleted || c.dateCreated);
-    if (d >= thisWeekStart && d <= thisWeekEnd) thisWeekCount += 1;
-    else if (d >= lastWeekStart && d <= lastWeekEnd) lastWeekCount += 1;
-  });
-  (s.habits || []).forEach((habit) => {
-    (Array.isArray(habit.completedDates) ? habit.completedDates : []).forEach((dateStr) => {
-      const d = new Date(`${dateStr}T00:00:00`);
-      if (d >= thisWeekStart && d <= thisWeekEnd) thisWeekCount += 1;
-      else if (d >= lastWeekStart && d <= lastWeekEnd) lastWeekCount += 1;
-    });
-  });
-
-  return { thisWeekCount, lastWeekCount, delta: thisWeekCount - lastWeekCount };
-}
-
-// -------------------------------------
 // Shared week-bounds helper (Sun-Sat), reused by weekly stats, category
 // balance, and the Challenges "This Week" due filter.
 // -------------------------------------
@@ -3224,29 +3281,49 @@ function drawRoundedTopRect(ctx, x, y, width, height, radius) {
 // the Habit Calendar's month grid, so the two views read consistently.
 // -------------------------------------
 function renderActivityStrip() {
-  const data = getLast7DaysCompletionCounts();
-  const maxCount = Math.max(1, ...data.map((d) => d.count));
+  const today = getTodayDateString();
+  const habits = getActiveHabits();
+  const data = Array.from({ length: 7 }, (_, index) => {
+    const date = addDaysToDateString(today, index - 6);
+    const rate = getFixedHabitPeriodCompletionRate(habits, date, date);
+    return { date, percent: rate.percent };
+  });
   const todayStr = getTodayDateString();
 
   const cells = data
     .map((point) => {
       const isToday = point.date === todayStr;
-      const intensity = point.count === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((point.count / maxCount) * 4)));
-      const dayLabel = CALENDAR_WEEKDAY_LABELS[new Date(`${point.date}T00:00:00`).getDay()].slice(0, 1);
+      const dayDate = new Date(`${point.date}T00:00:00`);
+      const dayLabel = CALENDAR_WEEKDAY_LABELS[dayDate.getDay()].slice(0, 2);
       const dateLabel = formatScheduledDateLabel(point.date);
-      const activityLabel = point.count === 1 ? "activity" : "activities";
 
       return `
-        <div class="activity-strip__day ${isToday ? "is-today" : ""}" role="img" aria-label="${dateLabel}: ${point.count} ${activityLabel}">
-          <span class="activity-strip__weekday">${dayLabel}</span>
-          <span class="activity-strip__date">${new Date(`${point.date}T00:00:00`).getDate()}</span>
-          <div class="activity-strip__cell intensity-${intensity}">${point.count}</div>
+        <div class="habit-rhythm-day ${isToday ? "is-today" : ""}" role="img" aria-label="${escapeAttribute(`${dateLabel}: ${point.percent}% habit completion`)}">
+          <span class="habit-rhythm-day__weekday">${dayLabel}</span>
+          <div class="habit-rhythm-day__track" aria-hidden="true"><span style="height:${point.percent}%"></span></div>
+          <strong>${point.percent}%</strong>
+          <span class="habit-rhythm-day__date">${dayDate.getDate()}</span>
         </div>
       `;
     })
     .join("");
 
-  return `<div class="activity-strip">${cells}</div>`;
+  return habits.length
+    ? `<div class="habit-rhythm-strip" role="group" aria-label="Daily habit completion for the last seven days">${cells}</div>`
+    : `<p class="habit-rhythm-empty text-muted">Add a daily habit to see your consistency here.</p>`;
+}
+
+function getLast7DaysHabitSummary() {
+  const habits = getActiveHabits();
+  const today = getTodayDateString();
+  const currentStart = addDaysToDateString(today, -6);
+  const previousStart = addDaysToDateString(today, -13);
+  const previousEnd = addDaysToDateString(today, -7);
+  return {
+    current: getFixedHabitPeriodCompletionRate(habits, currentStart, today),
+    previous: getFixedHabitPeriodCompletionRate(habits, previousStart, previousEnd),
+    hasHabits: habits.length > 0,
+  };
 }
 
 // -------------------------------------
@@ -3260,12 +3337,6 @@ function renderTodaySummaryCard() {
 
   return `
     <div class="card today-summary-card">
-      <div class="today-summary__half">
-        <div class="streak-flame">🔥</div>
-        <div class="stat-value">${state.user.streak}</div>
-        <div class="text-muted">day${state.user.streak === 1 ? "" : "s"} streak</div>
-      </div>
-      <div class="today-summary__divider"></div>
       <div class="today-summary__half">
         <div class="today-summary__ring-wrapper">
           <svg viewBox="0 0 80 80" class="today-summary__ring-svg">
@@ -3284,6 +3355,81 @@ function renderTodaySummaryCard() {
         <div class="text-muted">daily goal</div>
       </div>
     </div>
+  `;
+}
+
+function renderDashboardHabitsCard() {
+  const habits = getActiveHabits();
+  const today = getTodayDateString();
+  const completedIds = new Set(
+    getHabitCompletionsForDate(today, state, true).map((habit) => habit.id)
+  );
+  const completedCount = habits.filter((habit) => completedIds.has(habit.id)).length;
+  const percent = habits.length ? Math.round((completedCount / habits.length) * 100) : 0;
+  const pendingHabits = habits.filter((habit) => !completedIds.has(habit.id));
+  const nextHabits = pendingHabits.slice(0, 4);
+  const streak = getOverallHabitStreakStats(state, today).current;
+  const todayLabel = new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(`${today}T00:00:00`));
+
+  return `
+    <section class="card dashboard-habits-card" aria-labelledby="dashboard-habits-title">
+      <div class="dashboard-habits-card__header">
+        <div>
+          <p class="dashboard-section__eyebrow">DAILY REVIEW · ${escapeHTML(todayLabel)}</p>
+          <h3 id="dashboard-habits-title">Today's habits</h3>
+          <p class="text-muted">${!habits.length
+            ? "Create a simple routine and track it here each day."
+            : !pendingHabits.length
+            ? "All habits complete. Nice work keeping your routine."
+            : `${pendingHabits.length} habit${pendingHabits.length === 1 ? "" : "s"} left for today.`}</p>
+        </div>
+        <div class="dashboard-habits-card__actions">
+          <button type="button" class="btn-secondary btn-sm" data-navigate="habits">${habits.length ? "Manage" : "Add a habit"}</button>
+        </div>
+      </div>
+      ${habits.length ? `
+        <div class="dashboard-habits-card__stats" aria-label="Habit progress">
+          <div><strong>${completedCount}<span>/${habits.length}</span></strong><span>habits done</span></div>
+          <div><strong>${percent}%</strong><span>today</span></div>
+          <div><strong>${streak}</strong><span>day streak</span></div>
+        </div>
+        <div class="dashboard-habits-card__meter" role="progressbar" aria-label="Today's habit completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+          <span style="width:${percent}%"></span>
+        </div>
+        ${nextHabits.length ? `
+          <div class="dashboard-habits-card__list-heading">
+            <h4>Next up</h4>
+            <span>Check in as you go</span>
+          </div>
+          <div class="dashboard-habits-card__list" aria-label="Next habits to complete">
+          ${nextHabits.map((habit) => {
+            return `
+              <div class="dashboard-habit-row">
+                ${renderHabitCheckButton(habit, today)}
+                <span class="dashboard-habit-row__copy">
+                  <strong>${escapeHTML(habit.title)}</strong>
+                  <span>${habit.description
+                    ? escapeHTML(habit.description)
+                    : renderHabitCategoryTag(habit.category)}</span>
+                </span>
+                <span class="dashboard-habit-row__reward">+${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP</span>
+              </div>
+            `;
+          }).join("")}
+          </div>
+          ${pendingHabits.length > 3 ? `<p class="dashboard-habits-card__more text-muted">See all habits in Manage.</p>` : ""}
+        ` : `<p class="dashboard-habits-card__complete" role="status">All done for today. Nice work keeping your routine.</p>`}
+      ` : `
+        <div class="dashboard-habits-card__empty">
+          <span aria-hidden="true">✓</span>
+          <p><strong>Your habit list will live here.</strong><br>Set up a few daily habits to make your progress easy to check off.</p>
+        </div>
+      `}
+    </section>
   `;
 }
 
@@ -3338,24 +3484,6 @@ function renderResumeLockInBanner() {
       </div>
       <button class="btn btn-sm" id="dashboard-resume-lockin-btn">Resume</button>
     </div>
-  `;
-}
-
-function renderDashboardLockInCta() {
-  if (getActiveLockIn()) return "";
-
-  return `
-    <section class="dashboard-lockin-cta card" aria-label="Start a focus session">
-      <div class="dashboard-lockin-cta__icon" aria-hidden="true">🔒</div>
-      <div class="dashboard-lockin-cta__copy">
-        <p class="dashboard-section__eyebrow">MAKE SPACE FOR FOCUS</p>
-        <h3>Ready to lock in?</h3>
-        <p class="text-muted">Set a focus timer, choose your session, and give your next task your full attention.</p>
-      </div>
-      <button type="button" class="btn dashboard-lockin-cta__button" id="dashboard-lockin-btn">
-        <span>Start Lock In</span><span aria-hidden="true">↗</span>
-      </button>
-    </section>
   `;
 }
 
@@ -3516,8 +3644,7 @@ const CALENDAR_MONTH_NAMES = [
 ];
 const CALENDAR_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function renderCalendarDayDetails(dateStr, variant = "calendar") {
-  const isDashboardReview = variant === "dashboard";
+function renderCalendarDayDetails(dateStr) {
   const date = new Date(`${dateStr}T00:00:00`);
   const label = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(date);
   const eligibleHabits = (state.habits || []).filter((habit) =>
@@ -3528,12 +3655,6 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
   const completedIds = new Set(completedHabits.map((habit) => habit.id));
   const activeHabits = eligibleHabits.filter((habit) => !habit.archived);
   const completedCount = activeHabits.filter((habit) => completedIds.has(habit.id)).length;
-  const reviewHabits = isDashboardReview
-    ? activeHabits.filter((habit) => !completedIds.has(habit.id)).slice(0, 3)
-    : eligibleHabits;
-  const moreIncompleteHabits = isDashboardReview
-    ? Math.max(0, activeHabits.filter((habit) => !completedIds.has(habit.id)).length - reviewHabits.length)
-    : 0;
   const completionPercent = dateStr > getTodayDateString() || !activeHabits.length
     ? null
     : Math.round((completedCount / activeHabits.length) * 100);
@@ -3544,7 +3665,7 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
   const dayStats = [
     { value: activeHabits.length ? `${completedCount}/${activeHabits.length}` : "—", label: "habits" },
     { value: completionPercent === null ? "—" : `${completionPercent}%`, label: "completion" },
-    ...(isDashboardReview || calendarViewMode !== "month"
+    ...(calendarViewMode !== "month"
       ? [{ value: habitXp + challengeXp, label: "XP earned" }]
       : []),
     { value: bestStreak.current, label: "day streak" },
@@ -3563,25 +3684,21 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
     : "Habits still open";
 
   return `
-    <section class="card calendar-day-details ${isDashboardReview ? "dashboard-daily-review" : ""}" aria-labelledby="calendar-day-title">
+    <section class="card calendar-day-details" aria-labelledby="calendar-day-title">
       <div class="calendar-day-details__header">
         <div>
-          <p class="dashboard-section__eyebrow">${isDashboardReview ? "YOUR DAILY REVIEW" : "DAILY REVIEW"}</p>
+          <p class="dashboard-section__eyebrow">DAILY REVIEW</p>
           <h3 id="calendar-day-title">${escapeHTML(label)}</h3>
           <p class="text-muted">${escapeHTML(status)}</p>
         </div>
-        ${isDashboardReview
-          ? `<button type="button" class="btn-secondary btn-sm" data-navigate="habits">Manage habits</button>`
-          : `
-          <div class="calendar-day-details__controls">
-            ${calendarViewMode === "day" ? `
-              <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
-              <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
-              <button type="button" class="calendar-nav-btn" data-calendar-day-offset="1" aria-label="Next day">›</button>
-            ` : ""}
-            <button type="button" class="btn-secondary btn-sm" data-navigate="habits">${activeHabits.length ? "Manage habits" : "Add a habit"}</button>
-          </div>
-        `}
+        <div class="calendar-day-details__controls">
+          ${calendarViewMode === "day" ? `
+            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="-1" aria-label="Previous day">‹</button>
+            <button type="button" class="btn-secondary btn-sm" id="calendar-today-btn">Today</button>
+            <button type="button" class="calendar-nav-btn" data-calendar-day-offset="1" aria-label="Next day">›</button>
+          ` : ""}
+          <button type="button" class="btn-secondary btn-sm" data-navigate="habits">${activeHabits.length ? "Manage habits" : "Add a habit"}</button>
+        </div>
       </div>
       <div class="calendar-day-details__stats calendar-day-details__stats--${dayStats.length}">
         ${dayStats.map(({ value, label: statLabel }) => `
@@ -3589,8 +3706,8 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
         `).join("")}
       </div>
       <div class="calendar-day-details__habits">
-        <h4>${isDashboardReview ? "Next up" : "Habits"}</h4>
-        ${reviewHabits.length ? reviewHabits.map((habit) => `
+        <h4>Habits</h4>
+        ${eligibleHabits.length ? eligibleHabits.map((habit) => `
           <div class="calendar-day-habit ${completedIds.has(habit.id) ? "is-complete" : ""}">
             ${!habit.archived && canCheckIn ? renderHabitCheckButton(habit, dateStr) : `<span class="calendar-day-habit__mark">${completedIds.has(habit.id) ? "✓" : "·"}</span>`}
             <span class="calendar-day-habit__info">
@@ -3603,16 +3720,15 @@ function renderCalendarDayDetails(dateStr, variant = "calendar") {
               ? `+${(state.habitXpLedger || []).find((entry) => entry.habitId === habit.id && entry.date === dateStr)?.amount || 0} XP`
               : `+${CONFIG.HABIT_XP_REWARDS[habit.difficulty] || CONFIG.HABIT_XP_REWARDS.medium} XP`}</strong>
           </div>
-        `).join("") : `<p class="text-muted">${isDashboardReview && activeHabits.length ? "All habits checked in for today." : "No habits were set up by this date."}</p>`}
-        ${moreIncompleteHabits ? `<p class="text-muted calendar-day-details__more-habits">${moreIncompleteHabits} more to do · Open Habits to see the full list.</p>` : ""}
+        `).join("") : `<p class="text-muted">No habits were set up by this date.</p>`}
       </div>
-      ${(isDashboardReview || calendarViewMode !== "month") && challenges.completed.length ? `
+      ${calendarViewMode !== "month" && challenges.completed.length ? `
         <div class="calendar-day-details__challenges">
           <h4>Challenges completed (${challenges.completed.length})</h4>
           ${challenges.completed.map((challenge) => renderDayDetailRow(challenge, true)).join("")}
         </div>
       ` : ""}
-      ${(isDashboardReview || calendarViewMode !== "month") && challenges.active.length ? `
+      ${calendarViewMode !== "month" && challenges.active.length ? `
         <div class="calendar-day-details__challenges">
           <h4>Scheduled challenges (${challenges.active.length})</h4>
           ${challenges.active.map((challenge) => renderDayDetailRow(challenge, false)).join("")}
@@ -3914,14 +4030,14 @@ function renderHabitTracker() {
   const habitPendingDeletion = state.habits.find((habit) => habit.id === confirmingHabitDeleteId);
   const pendingCheckInCount = getHabitCheckInCount(habitPendingDeletion);
   const days = getWeekGridData(weekViewDate);
-  const daysToDate = days.filter((day) => day.dateStr <= getTodayDateString()).length;
+  const today = getTodayDateString();
   const checkedThisWeek = habits.reduce(
-    (total, habit) => total + days.filter((day) =>
+    (total, habit) => total + days.filter((day) => day.dateStr <= today &&
       Array.isArray(habit.completedDates) && habit.completedDates.includes(day.dateStr)
     ).length,
     0
   );
-  const possibleCheckIns = habits.length * daysToDate;
+  const possibleCheckIns = habits.length * days.length;
   const progress = possibleCheckIns ? Math.round((checkedThisWeek / possibleCheckIns) * 100) : 0;
   const firstDay = days[0];
   const lastDay = days[6];
@@ -4023,7 +4139,12 @@ function renderHabitTracker() {
       </table>
     </div>
   `;
-  const analyticsTitle = { day: "Daily performance", week: "Weekly performance", month: "Monthly performance" }[habitAnalyticsPeriod];
+  const analyticsTitle = {
+    day: "Daily performance",
+    week: "Weekly performance",
+    month: "Monthly performance",
+    year: "Yearly performance",
+  }[habitAnalyticsPeriod];
   const performancePoints = habitAnalyticsPeriod === "month"
     ? [
         ...Array.from({ length: new Date(`${analytics.startDate}T00:00:00`).getDay() }, () => null),
@@ -4047,15 +4168,15 @@ function renderHabitTracker() {
       </div>
       <div class="card habit-overview-card">
         <span class="habit-overview-card__icon" aria-hidden="true">✅</span>
-        <div><strong>${analytics.completedHabitCount}</strong><span>habits completed this ${habitAnalyticsPeriod === "day" ? "day" : habitAnalyticsPeriod}</span></div>
+        <div><strong>${analytics.completed}</strong><span>check-ins this ${habitAnalyticsPeriod === "day" ? "day" : habitAnalyticsPeriod}</span></div>
       </div>
       <div class="card habit-overview-card">
         <span class="habit-overview-card__icon" aria-hidden="true">🔥</span>
-        <div><strong>${analytics.currentStreak} / ${analytics.bestStreak}</strong><span>current / best streak</span></div>
+        <div><strong>${analytics.currentStreak}</strong><span>current day streak</span></div>
       </div>
       <div class="card habit-overview-card">
-        <span class="habit-overview-card__icon" aria-hidden="true">◷</span>
-        <div><strong>${analytics.overallPercent}%</strong><span>overall completion</span></div>
+        <span class="habit-overview-card__icon" aria-hidden="true">🏆</span>
+        <div><strong>${analytics.bestStreak}</strong><span>best day streak</span></div>
       </div>
     </section>
 
@@ -4066,7 +4187,7 @@ function renderHabitTracker() {
           <h3 id="habit-analytics-title">${analyticsTitle}</h3>
         </div>
         <div class="habit-analytics-tabs" role="group" aria-label="Habit analytics period">
-          ${[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]].map(([period, label]) => `
+          ${[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"], ["year", "Year"]].map(([period, label]) => `
             <button type="button" data-habit-period="${period}" class="${habitAnalyticsPeriod === period ? "is-active" : ""}" aria-pressed="${habitAnalyticsPeriod === period}">${label}</button>
           `).join("")}
         </div>
@@ -4075,7 +4196,9 @@ function renderHabitTracker() {
         <div class="habit-analytics-summary__metric">
           <strong>${analytics.hasData ? `${analytics.percent}%` : "—"}</strong>
           <span>${analytics.hasData
-            ? `${analytics.completed} of ${analytics.expected} daily check-ins`
+            ? habitAnalyticsPeriod === "year"
+              ? "of your full-year habit target"
+              : `${analytics.completed} check-ins ${habitAnalyticsPeriod === "day" ? "today" : `this ${habitAnalyticsPeriod}`}`
             : "No active habits to measure yet."}</span>
         </div>
         ${analytics.hasData ? `
@@ -4085,20 +4208,42 @@ function renderHabitTracker() {
           <p>${analytics.bestPerformingDay ? `Best weekday: ${analytics.bestPerformingDay.label} (${analytics.bestPerformingDay.percent}%)` : "No habit activity yet this month."} · ${analytics.monthlyDelta === null ? "No comparable activity last month." : `${analytics.monthlyDelta >= 0 ? "+" : ""}${analytics.monthlyDelta}% vs last month to date`}</p>
         ` : habitAnalyticsPeriod === "day" ? `
           <p>${analytics.hasData ? `${analytics.todayCompleted} complete · ${analytics.todayRemaining} remaining today` : "Add an active habit to start tracking daily performance."}</p>
+        ` : habitAnalyticsPeriod === "year" ? `
+          <p>Annual progress is measured against every active habit, every day of this year. Future months are left blank.</p>
         ` : `
-          <p>Each tile shows one day of this week's habit check-ins.</p>
+          <p>Each tile shows one day's completion rate for the last seven days.</p>
         `}
       </div>
-      ${analytics.activeCount && analytics.dailyPoints.length ? `
+      ${habitAnalyticsPeriod === "year" ? analytics.activeCount ? `
+        <div class="habit-year-grid" role="group" aria-label="Monthly habit completion rates for this year">
+          ${analytics.yearlyMonths.map((month) => `
+            <div class="habit-year-month ${month.isCurrent ? "is-current" : ""} ${month.isFuture ? "is-future" : ""}" role="img" aria-label="${escapeAttribute(`${month.label}: ${month.percent === null ? "upcoming" : `${month.percent}% complete`}`)}">
+              <span>${escapeHTML(month.shortLabel)}</span>
+              <strong>${month.percent === null ? "—" : `${month.percent}%`}</strong>
+              <span class="habit-year-month__track" aria-hidden="true"><span style="width:${month.percent ?? 0}%"></span></span>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<p class="text-muted">Add an active habit to see your yearly progress.</p>` : analytics.activeCount && analytics.dailyPoints.length ? `
         <div class="habit-performance-days ${habitAnalyticsPeriod === "day" ? "is-day" : ""} ${habitAnalyticsPeriod === "month" ? "is-month" : "is-week"}" role="group" aria-label="${analyticsTitle}, shown by day">
           ${performancePoints.map((point) => point ? `
-            <div class="habit-performance-day ${point.percent === null ? "is-no-data" : ""} ${point.isFuture ? "is-future" : ""} ${point.date === todayStr ? "is-today" : ""}" role="img" aria-label="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}% complete`}`)}" title="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}%`}`)}">
-              <span class="habit-performance-day__weekday">${habitAnalyticsPeriod === "month" ? point.weekday.slice(0, 1) : escapeHTML(point.weekday)}</span>
-              <strong class="habit-performance-day__date">${point.dayNumber}</strong>
-              <span class="habit-performance-day__percent">${point.percent === null ? "—" : `${point.percent}%`}</span>
-              ${habitAnalyticsPeriod !== "month" ? `<span class="habit-performance-day__count">${point.percent === null ? point.isFuture ? "Upcoming" : "No habits" : `${point.completed}/${point.expected} habits`}</span>` : ""}
-              <span class="habit-performance-day__track" aria-hidden="true"><span style="width:${point.percent ?? 0}%"></span></span>
-            </div>
+            ${habitAnalyticsPeriod === "week" ? `
+              <div class="habit-performance-weekday" role="img" aria-label="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}% complete`}`)}" title="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}%`}`)}">
+                <span class="habit-performance-weekday__label">${escapeHTML(point.weekday.slice(0, 2).toUpperCase())}</span>
+                <span class="habit-performance-weekday__tile ${point.percent === null ? "is-no-data" : ""} ${point.isFuture ? "is-future" : ""} ${point.date === todayStr ? "is-today" : ""}">
+                  <span class="habit-performance-weekday__fill" style="height:${point.percent ?? 0}%"></span>
+                </span>
+                <strong class="habit-performance-weekday__percent">${point.percent === null ? "—" : `${point.percent}%`}</strong>
+                <span class="habit-performance-weekday__date">${point.dayNumber}</span>
+              </div>
+            ` : `
+              <div class="habit-performance-day ${point.percent === null ? "is-no-data" : ""} ${point.isFuture ? "is-future" : ""} ${point.date === todayStr ? "is-today" : ""}" role="img" aria-label="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}% complete`}`)}" title="${escapeAttribute(`${point.fullLabel}: ${point.percent === null ? point.isFuture ? "upcoming" : "no eligible habits" : `${point.completed} of ${point.expected} habits, ${point.percent}%`}`)}">
+                <span class="habit-performance-day__weekday">${point.weekday.slice(0, 1)}</span>
+                <strong class="habit-performance-day__date">${point.dayNumber}</strong>
+                <span class="habit-performance-day__percent">${point.percent === null ? "—" : `${point.percent}%`}</span>
+                <span class="habit-performance-day__track" aria-hidden="true"><span style="width:${point.percent ?? 0}%"></span></span>
+              </div>
+            `}
           ` : `<span class="habit-performance-day__spacer" aria-hidden="true"></span>`).join("")}
         </div>
       ` : `<p class="text-muted">Add an active habit to see performance here.</p>`}
@@ -4155,8 +4300,8 @@ function renderHabitTracker() {
         </div>
         <button class="calendar-nav-btn" id="habits-week-next-btn" aria-label="Next week">›</button>
       </div>
-      <div class="habit-week-progress" aria-label="${progress}% completion this week">
-        <div class="habit-week-progress__copy"><strong>${progress}%</strong><span class="text-muted">of your habit check-ins</span></div>
+      <div class="habit-week-progress" aria-label="Weekly habit completion: ${progress}%">
+        <div class="habit-week-progress__copy"><strong>${progress}%</strong><span class="text-muted">of this week's habit target</span></div>
         <div class="habit-week-progress__track"><span style="width:${progress}%"></span></div>
       </div>
       ${habits.length ? `
@@ -4181,7 +4326,10 @@ function renderHabitTracker() {
                   </th>
                   ${days.map((day) => `
                     <td class="${day.isToday ? "is-today" : "is-other-day"}">
-                      <span class="habit-week-table__day-label">${day.dayLabel.slice(0, 1)} ${day.dayNumber}</span>
+                      <span class="habit-week-table__day-label">
+                        <span>${day.dayLabel.slice(0, 2)}</span>
+                        <strong>${day.dayNumber}</strong>
+                      </span>
                       ${renderHabitCheckButton(habit, day.dateStr)}
                     </td>
                   `).join("")}
@@ -4522,9 +4670,17 @@ function renderPictureInPictureContent() {
   const pipWindow = lockInPictureInPictureWindow;
   if (!pipWindow || pipWindow.closed) return;
   const active = getActiveLockIn();
+  const pinnedTimer = pictureInPictureItems.find((item) => item.kind === "timer");
+  const activeTimer = active?.id === pinnedTimer?.id ? active : null;
+  const finishedTimer = pinnedTimer && !activeTimer
+    ? state.challenges.find((challenge) =>
+        challenge.id === pinnedTimer.id && challenge.isLockIn && challenge.completed
+      )
+    : null;
+  const timerSession = activeTimer || finishedTimer;
   const validItems = pictureInPictureItems.filter((item) =>
     item.kind === "timer"
-      ? active?.id === item.id
+      ? timerSession?.id === item.id
       : item.kind === "session-note"
         ? active?.id === item.id
         : state.notes.some((note) => note.id === item.id)
@@ -4533,14 +4689,30 @@ function renderPictureInPictureContent() {
     pictureInPictureItems = validItems;
     updatePictureInPicturePinButtons();
   }
-  const hasTimer = pictureInPictureItems.some((item) => item.kind === "timer" && item.id === active?.id);
+  const hasTimer = Boolean(timerSession);
   const noteItems = pictureInPictureItems.filter((item) => item.kind !== "timer");
-  const timerMarkup = hasTimer && active ? `
+  const timerMarkup = activeTimer ? `
     <section class="lockin-pip" aria-label="Lock In timer">
-      <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(active.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="timer">Unpin timer</button></header>
+      <header class="lockin-pip__header"><strong id="lockin-pip-title">${escapeHTML(activeTimer.title)}</strong><button type="button" class="btn-secondary btn-sm" data-pip-unpin="timer">Unpin timer</button></header>
       <span id="lockin-pip-timer" class="lockin-pip__timer"></span>
       <div class="lockin-pip__track"><span id="lockin-pip-progress"></span></div>
-      <div class="lockin-pip__actions"><button type="button" class="btn-secondary btn-sm" data-pip-pause>${active.isPaused ? "Resume" : "Pause"}</button><button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button></div>
+      <div class="lockin-pip__actions">
+        <button type="button" class="btn-secondary btn-sm" data-pip-pause>${activeTimer.isPaused ? "Resume" : "Pause"}</button>
+        <button type="button" class="btn-secondary btn-sm" data-pip-add-time>+10 min</button>
+        <button type="button" class="btn-secondary btn-sm" data-pip-finish="${escapeAttribute(activeTimer.id)}">Finish</button>
+      </div>
+    </section>
+  ` : finishedTimer ? `
+    <section class="lockin-pip lockin-pip--finished" aria-label="Lock In timer finished">
+      <div>
+        <p class="dashboard-section__eyebrow">FOCUS BLOCK COMPLETE</p>
+        <h2>${escapeHTML(finishedTimer.title)}</h2>
+        <p>${finishedTimer.xpValue} XP earned</p>
+      </div>
+      <div class="lockin-pip__actions">
+        <button type="button" class="btn-secondary btn-sm" data-pip-finished-close="${escapeAttribute(finishedTimer.id)}">Close timer</button>
+        <button type="button" class="btn btn-sm" data-pip-new-timer="${escapeAttribute(finishedTimer.id)}">Start new timer</button>
+      </div>
     </section>
   ` : "";
   const noteMarkup = noteItems.map((item) => {
@@ -4585,9 +4757,39 @@ function renderPictureInPictureContent() {
   pipWindow.document.body.innerHTML = `<main class="questify-pip-layout">${timerMarkup}${noteMarkup}</main>`;
   pipWindow.document.title = "Questify — Pinned tools";
   attachPictureInPictureHandlers(pipWindow);
-  if (hasTimer) updateLockInPictureInPicture(active, getLockInElapsedSeconds(active));
+  if (activeTimer) updateLockInPictureInPicture(activeTimer, getLockInElapsedSeconds(activeTimer));
   pipWindow.document.body.classList.toggle("is-floating-transparent", state.preferences.floatingWindowsTransparent);
   resizePictureInPictureWindow();
+}
+
+function startNewLockInFromPictureInPicture(completedId) {
+  const completed = state.challenges.find((challenge) =>
+    challenge.id === completedId && challenge.isLockIn && challenge.completed
+  );
+  if (!completed) {
+    showToast("That completed timer is no longer available.");
+    return;
+  }
+
+  const result = startLockIn(completed.title, completed.targetMinutes, completed.difficulty);
+  if (!result.ok) {
+    showToast(result.error);
+    return;
+  }
+
+  const active = getActiveLockIn();
+  if (!active) {
+    console.error("A new Lock In session was not available after starting its timer.");
+    showToast("Questify couldn't start a new timer. Please try again.");
+    return;
+  }
+  pictureInPictureItems = pictureInPictureItems.filter((item) =>
+    item.kind !== "timer" || item.id !== completedId
+  );
+  pictureInPictureItems.push({ kind: "timer", id: active.id });
+  renderView();
+  renderPictureInPictureContent();
+  showToast("A new Lock In timer has started.");
 }
 
 function attachPictureInPictureHandlers(pipWindow) {
@@ -4607,6 +4809,18 @@ function attachPictureInPictureHandlers(pipWindow) {
     if (!current) return;
     addLockInTime(current.id, 10);
     updateLockInTimerDisplay();
+  });
+  pipWindow.document.querySelector("[data-pip-finish]")?.addEventListener("click", (event) => {
+    const active = getActiveLockIn();
+    if (!active || active.id !== event.currentTarget.dataset.pipFinish) return;
+    finishLockIn(active.id);
+    renderView();
+  });
+  pipWindow.document.querySelector("[data-pip-finished-close]")?.addEventListener("click", (event) => {
+    removePictureInPictureItem("timer", event.currentTarget.dataset.pipFinishedClose);
+  });
+  pipWindow.document.querySelector("[data-pip-new-timer]")?.addEventListener("click", (event) => {
+    startNewLockInFromPictureInPicture(event.currentTarget.dataset.pipNewTimer);
   });
   pipWindow.document.querySelectorAll("[data-pip-session-note]").forEach((sessionNoteInput) => {
     sessionNoteInput.addEventListener("input", () => {
@@ -4674,8 +4888,12 @@ function resizePictureInPictureWindow() {
 function getPictureInPictureWindowSize(items) {
   const noteCount = items.filter((item) => item.kind !== "timer").length;
   const hasTimer = items.some((item) => item.kind === "timer");
-  const width = noteCount ? 460 : 380;
-  const height = Math.min(780, Math.max(220, (hasTimer ? 190 : 0) + noteCount * 370 + 24));
+  const width = noteCount ? 360 : 320;
+  const itemCount = noteCount + Number(hasTimer);
+  const height = Math.min(
+    720,
+    Math.max(180, (hasTimer ? 188 : 0) + noteCount * 270 + Math.max(0, itemCount - 1) * 8 + 16)
+  );
   return { width, height };
 }
 
@@ -4848,7 +5066,11 @@ async function ensurePictureInPictureWindow(item) {
       return existingWindow;
     }
     const { width, height } = getPictureInPictureWindowSize([item]);
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width, height });
+    const pipWindow = await window.documentPictureInPicture.requestWindow({
+      width,
+      height,
+      preferInitialWindowPlacement: true,
+    });
     lockInPictureInPictureWindow = pipWindow;
     pictureInPictureRequestedSize = { width, height };
     preparePictureInPictureWindow(pipWindow);
@@ -5137,9 +5359,9 @@ const TOUR_STEPS = [
   {
     view: "dashboard",
     section: "Dashboard",
-    selector: ".dashboard-daily-review",
-    title: "Start with your Daily Review",
-    body: "Check today's habit progress, XP, streak, and weekly rhythm here. A check-in made on this card stays in sync with Habits and Calendar.",
+    selector: ".dashboard-habits-card",
+    title: "Check in on your habits",
+    body: "See your daily progress and complete the next three habits here. Check-ins stay in sync with Habits and Calendar.",
   },
   {
     view: "dashboard",
@@ -5837,12 +6059,14 @@ async function toggleFloatingPopupPictureInPicture() {
     return;
   }
   try {
-    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 380, height: 480 });
     const group = getFloatingPopupGroup(floatingPopupId);
     if (!group) {
-      pipWindow.close();
       return;
     }
+    const pipWindow = await window.documentPictureInPicture.requestWindow({
+      ...getPictureInPictureWindowSize(group.items),
+      preferInitialWindowPlacement: true,
+    });
     floatingPictureInPictureWindow = pipWindow;
     preparePictureInPictureWindow(pipWindow);
     pipWindow.document.body.classList.add("floating-popup-pip-host");
@@ -6143,11 +6367,9 @@ const views = {
       </div>
     </section>
 
+    ${renderDashboardHabitsCard()}
+
     ${renderFirstTimeWelcomeCard()}
-
-    ${renderCalendarDayDetails(getTodayDateString(), "dashboard")}
-
-    ${renderDashboardLockInCta()}
 
     ${renderResumeLockInBanner()}
 
@@ -6155,7 +6377,7 @@ const views = {
       <div class="dashboard-section__heading">
         <div>
           <p class="dashboard-section__eyebrow">YOUR DAILY SNAPSHOT</p>
-          <h3 id="dashboard-today-title">Today</h3>
+          <h3 id="dashboard-today-title">Challenges</h3>
         </div>
       </div>
       <div class="dashboard-overview-grid">
@@ -6164,7 +6386,7 @@ const views = {
           const goal = getDailyGoalProgress();
           const dueCount = getOverdueChallenges().length + getDueTodayChallenges().length;
           return `
-            <div class="card dashboard-today-stats">
+            <div class="card dashboard-today-stats" aria-label="Today's challenge summary">
               <div class="dashboard-today-stats__item">
                 <span class="dashboard-today-stats__icon" aria-hidden="true">✅</span>
                 <span class="dashboard-today-stats__value">${getTodayCompletedCount()}</span>
@@ -6266,21 +6488,27 @@ const views = {
           <div class="dashboard-card-heading">
             <div>
               <h4>Last 7 days</h4>
-              <p class="text-muted">A little progress, every day.</p>
+              <p class="text-muted">Daily habit completion, at a glance.</p>
             </div>
           </div>
           ${renderActivityStrip()}
           ${(() => {
-            const cmp = getWeekComparison();
-            const arrow = cmp.delta > 0 ? "▲" : cmp.delta < 0 ? "▼" : "•";
-            const deltaClass = cmp.delta > 0 ? "is-up" : cmp.delta < 0 ? "is-down" : "";
-            const deltaText = cmp.delta === 0 ? "same as" : `${arrow} ${Math.abs(cmp.delta)} vs`;
+            const summary = getLast7DaysHabitSummary();
+            if (!summary.hasHabits) return "";
+            const delta = summary.current.percent - summary.previous.percent;
+            const deltaClass = delta > 0 ? "is-up" : delta < 0 ? "is-down" : "";
+            const comparison = delta === 0
+              ? "Holding steady vs the previous 7 days"
+              : `${delta > 0 ? "Up" : "Down"} ${Math.abs(delta)} points vs the previous 7 days`;
             return `
-              <p class="week-comparison-note text-muted">
-                <strong>${cmp.thisWeekCount}</strong> this week ·
-                <span class="week-comparison-delta ${deltaClass}">${deltaText}</span>
-                last week (${cmp.lastWeekCount})
-              </p>
+              <div class="habit-rhythm-summary">
+                <div class="habit-rhythm-summary__heading">
+                  <strong>${summary.current.percent}%</strong>
+                  <span>7-day completion</span>
+                </div>
+                <div class="habit-progress-track" role="progressbar" aria-label="Habit completion over the last seven days" aria-valuenow="${summary.current.percent}" aria-valuemin="0" aria-valuemax="100"><span style="width:${summary.current.percent}%"></span></div>
+                <p class="week-comparison-delta ${deltaClass}">${comparison}</p>
+              </div>
             `;
           })()}
         </div>
@@ -6780,13 +7008,13 @@ const views = {
     <section class="settings-section card tour-replay-card" aria-labelledby="tour-replay-title">
       <div>
         <h3 id="tour-replay-title">Product walkthrough</h3>
-        <p class="text-muted">Tour Daily Review, synced habit tracking, Calendar, Lock In, Sticky Notes, badges, Profile, and data backups.</p>
+        <p class="text-muted">Tour daily habit check-ins, Calendar, Lock In, Sticky Notes, badges, Profile, and data backups.</p>
       </div>
       <button type="button" id="replay-tour-btn" class="btn-secondary btn-sm">Replay tour</button>
     </section>
 
-    <div class="settings-section card">
-      <div class="settings-row">
+    <div class="settings-section card settings-data-loss-card">
+      <div class="settings-row settings-data-loss-card__row">
         <div>
           <div>Reset All Data</div>
           <div class="text-muted">Erases habits, challenges, XP, badges, and streak. Your name is kept.</div>
@@ -6812,8 +7040,8 @@ const views = {
       }
     </div>
 
-    <div class="settings-section card">
-      <div class="settings-row">
+    <div class="settings-section card settings-data-loss-card">
+      <div class="settings-row settings-data-loss-card__row">
         <div>
           <div>Log Out</div>
           <div class="text-muted">Clears your session on this device</div>
@@ -6938,12 +7166,6 @@ function attachDashboardHandlers() {
     });
   }
 
-  const startLockInBtn = document.getElementById("dashboard-lockin-btn");
-  if (startLockInBtn) {
-    startLockInBtn.addEventListener("click", () => {
-      navigateTo("lockin");
-    });
-  }
 }
 
 function attachHabitHandlers() {
